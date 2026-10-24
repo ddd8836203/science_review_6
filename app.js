@@ -1,0 +1,2281 @@
+// ============================================================================
+// 六上自然特訓 2.0 (app.js)
+// 100% 對齊國語網頁架構：
+// 1. 頂部嵌入式折疊題號盤 (46x42px，淨錯誤深淺色階，點擊上方按鈕向下展開)
+// 2. 9 所段考學校統一收納至首頁 EXAM_MID1 單元大卡片
+// 3. 測驗頁頂部常駐學校切換 Tabs (schoolTabsHtml)
+// ============================================================================
+
+const STORAGE_PREFIX = 'g6_science_';
+const ACTIVE_USER_KEY = 'g6_science_active_user';
+const CLOUD_SYNC_URL_KEY = 'g6_science_firebase_db_url';
+const DEFAULT_FIREBASE_DB_URL = 'https://math-review-6-default-rtdb.asia-southeast1.firebasedatabase.app';
+
+const USERS = [
+  { id: 'rex',   name: 'Rex',    role: '正式學員', icon: '🦖', color: '#059669', bg: '#ecfdf5', isTest: false },
+  { id: 'test1', name: 'Test 1', role: '測試帳號', icon: '🧪', color: '#0284c7', bg: '#e0f2fe', isTest: true },
+  { id: 'test2', name: 'Test 2', role: '測試帳號', icon: '🔬', color: '#d97706', bg: '#fef3c7', isTest: true }
+];
+
+const state = {
+  currentUser: localStorage.getItem(ACTIVE_USER_KEY) || 'rex',
+  view: 'dashboard', // 'dashboard' | 'quiz' | 'result' | 'error_book' | 'print' | 'export' | 'review'
+  currentReviewUnitId: 'U1',
+  
+  // 跨裝置雲端同步 (Firebase Realtime DB)
+  cloudDbUrl: localStorage.getItem(CLOUD_SYNC_URL_KEY) || DEFAULT_FIREBASE_DB_URL,
+  cloudSyncStatus: 'synced', // 'syncing' | 'synced' | 'offline'
+  
+  // Quiz session
+  quizTitle: '',
+  quizSubtitle: '',
+  quizMode: 'unit', // 'unit' | 'school' | 'error_book' | 'all'
+  currentUnitId: 'EXAM_MID1',
+  examSchool: 'ALL', // 'ALL' or specific school ID like 'dadun'
+  quizQuestions: [],
+  quizIndex: 0,
+  answers: {}, // qId -> { result: 'ok'|'bad', selected: string, revealed: boolean, timeSeconds: number }
+  sessionStartTime: 0,
+  questionStartTime: 0,
+  
+  // Drawer (位於題目上方)
+  drawerOpen: false,
+
+  // Error book filter
+  errorFilterSchool: 'ALL',
+  
+  // Print config
+  printConfig: {
+    school: 'ALL',
+    count: 20
+  }
+};
+
+// ============================================================================
+// 1. 本地儲存與計數 (LocalStorage & Error Counts)
+// ============================================================================
+function getUserKey(key, uid = state.currentUser) {
+  return `${STORAGE_PREFIX}u_${uid}_${key}`;
+}
+
+function getCurrentUserObj() {
+  return USERS.find(u => u.id === state.currentUser) || USERS[0];
+}
+
+function getUserStatsSummary(uid) {
+  const eb = getErrorBook(uid);
+  const ec = getErrorCounts(uid);
+  const cc = getCorrectCounts(uid);
+  const history = getFullHistory(uid);
+  const bank = (typeof QUESTION_BANK !== 'undefined' ? QUESTION_BANK : []);
+  const totalInBank = bank.length || 71;
+  
+  let masteredCount = 0;
+  bank.forEach(q => {
+    const net = (ec[q.id] || 0) - (cc[q.id] || 0);
+    const corr = cc[q.id] || 0;
+    if (corr > 0 && net <= 0) masteredCount++;
+  });
+  const pct = totalInBank > 0 ? Math.round((masteredCount / totalInBank) * 100) : 0;
+  return {
+    mastered: masteredCount,
+    pct,
+    errCount: eb.length,
+    sessions: history.length
+  };
+}
+
+function updateNavUserUI() {
+  const curUser = getCurrentUserObj();
+  const iconEl = document.getElementById('nav-user-icon');
+  const nameEl = document.getElementById('nav-user-name');
+  const btn = document.getElementById('nav-user');
+  if (iconEl) iconEl.textContent = curUser.icon;
+  if (nameEl) nameEl.textContent = curUser.name;
+  if (btn) {
+    btn.style.borderColor = curUser.color;
+    btn.style.background = curUser.bg;
+    btn.style.color = curUser.color;
+  }
+}
+
+function switchUser(uid) {
+  const user = USERS.find(u => u.id === uid);
+  if (!user) return;
+  state.currentUser = user.id;
+  localStorage.setItem(ACTIVE_USER_KEY, user.id);
+  updateNavUserUI();
+  updateNavBadge();
+  closeUserDropdown();
+  showToast(`已切換至學員：${user.name} (${user.role})`);
+  syncFromCloud(user.id, false);
+  render();
+}
+
+async function resetTestUser(uid) {
+  const user = USERS.find(u => u.id === uid);
+  if (!user || !user.isTest) return;
+  // 清空本機
+  localStorage.removeItem(getUserKey('errorBook', uid));
+  localStorage.removeItem(getUserKey('errorCounts', uid));
+  localStorage.removeItem(getUserKey('correctCounts', uid));
+  localStorage.removeItem(getUserKey('full_history', uid));
+  localStorage.removeItem(getUserKey('recent_answer_logs', uid));
+  
+  // 同步清空雲端對應節點
+  if (state.cloudDbUrl) {
+    try {
+      const base = state.cloudDbUrl.replace(/\/+$/, '');
+      await fetch(`${base}/g6_science_users/${uid}.json`, { method: 'DELETE' });
+    } catch (e) {}
+  }
+
+  showToast(`已清空【${user.name}】的測驗與錯題紀錄 🧹（本機與雲端同步重置）`);
+  updateNavBadge();
+  renderUserDropdown();
+  if (state.currentUser === uid) {
+    render();
+  }
+}
+
+function renderUserDropdown() {
+  const menu = document.getElementById('user-dropdown-menu');
+  if (!menu) return;
+  
+  const curUser = getCurrentUserObj();
+  const itemsHtml = USERS.map(u => {
+    const isCurrent = u.id === state.currentUser;
+    const st = getUserStatsSummary(u.id);
+    return `
+      <div class="user-dropdown-item ${isCurrent ? 'active' : ''}" style="--u-color:${u.color}; --u-bg:${u.bg};">
+        <div class="user-item-main" data-select-user="${u.id}">
+          <span class="user-item-avatar">${u.icon}</span>
+          <div class="user-item-meta">
+            <div class="user-item-header">
+              <span class="user-item-name">${u.name}</span>
+              <span class="user-item-role">${u.role}</span>
+              ${isCurrent ? `<span class="user-item-badge">✔ 使用中</span>` : ''}
+            </div>
+            <div class="user-item-stats">
+              <span>掌握度 <b>${st.pct}%</b></span>
+              <span>·</span>
+              <span class="${st.errCount > 0 ? 'err-alert' : ''}">錯題 <b>${st.errCount}</b> 題</span>
+              <span>·</span>
+              <span>練習 <b>${st.sessions}</b> 場</span>
+            </div>
+          </div>
+        </div>
+        <div class="user-item-actions">
+          ${!isCurrent ? `
+            <button type="button" class="btn-dropdown-select" data-select-user="${u.id}">切換</button>
+          ` : ''}
+          ${u.isTest ? `
+            <button type="button" class="btn-dropdown-reset" data-reset-test="${u.id}" title="一鍵清空此測試帳號紀錄">🧹 清空</button>
+          ` : `
+            <span class="user-protect-badge" title="Rex 正式學員紀錄受到嚴格保護">🔒 保護中</span>
+          `}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  menu.innerHTML = `
+    <div class="user-dropdown-head">
+      <div class="user-dropdown-title">
+        <b>👥 切換學習帳號</b>
+        <small>各學員進度與錯題本完全獨立隔離</small>
+      </div>
+      <button type="button" class="user-dropdown-close-btn" id="btn-close-user-dropdown" aria-label="關閉選單">✕</button>
+    </div>
+    <div class="user-dropdown-list">
+      ${itemsHtml}
+    </div>
+    <div class="user-dropdown-foot">
+      <!-- 雲端同步狀態卡片 (與國語、數學共用 math-review-6 Firebase) -->
+      <div class="cloud-sync-card">
+        <div class="cloud-sync-header">
+          <div class="cloud-sync-title">
+            <span>☁️ 跨裝置雲端同步</span>
+            <span class="cloud-status-badge ${state.cloudSyncStatus}">${state.cloudSyncStatus === 'synced' ? '🟢 已連線同步' : state.cloudSyncStatus === 'syncing' ? '🟡 同步中' : '⚪ 本機儲存'}</span>
+          </div>
+          <button type="button" class="btn-sync-now" id="btn-sync-now" title="立即與 Firebase 同步">🔄 立即同步</button>
+        </div>
+        <div class="cloud-sync-desc">
+          與國語、數學共用 Firebase 資料庫，自然進度獨立儲存在 <code>/g6_science_users/${state.currentUser}.json</code>，電腦與 iPad 自動即時同步。
+        </div>
+      </div>
+      <div class="user-dropdown-foot-hint">
+        <span>💡 測試帳號可隨時一鍵清空，絕不影響 Rex 的正式作答歷程與錯題本。</span>
+      </div>
+    </div>
+  `;
+
+  document.getElementById('btn-close-user-dropdown')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeUserDropdown();
+  });
+
+  menu.querySelectorAll('[data-select-user]').forEach(el => {
+    el.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const uid = el.getAttribute('data-select-user');
+      switchUser(uid);
+    });
+  });
+
+  menu.querySelectorAll('[data-reset-test]').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const uid = btn.getAttribute('data-reset-test');
+      const u = USERS.find(x => x.id === uid);
+      if (confirm(`確定要清空測試帳號【${u?.name}】的所有測驗歷程與錯題紀錄嗎？`)) {
+        resetTestUser(uid);
+      }
+    });
+  });
+
+  document.getElementById('btn-sync-now')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    syncFromCloud(state.currentUser, true);
+  });
+}
+
+function toggleUserDropdown() {
+  const menu = document.getElementById('user-dropdown-menu');
+  const btn = document.getElementById('nav-user');
+  if (!menu) return;
+  const isOpen = menu.style.display === 'block';
+  if (isOpen) {
+    closeUserDropdown();
+  } else {
+    renderUserDropdown();
+    menu.style.display = 'block';
+    btn?.setAttribute('aria-expanded', 'true');
+    btn?.classList.add('dropdown-open');
+  }
+}
+
+function closeUserDropdown() {
+  const menu = document.getElementById('user-dropdown-menu');
+  const btn = document.getElementById('nav-user');
+  if (menu) menu.style.display = 'none';
+  btn?.setAttribute('aria-expanded', 'false');
+  btn?.classList.remove('dropdown-open');
+}
+
+// ============================================================================
+// 1.1 跨裝置雲端同步模組 (Firebase Realtime DB REST API)
+// 與國語、數學共用 math-review-6 專案，自然專屬節點：/g6_science_users/${uid}.json
+// ============================================================================
+
+function mergeCounts(localMap = {}, remoteMap = {}) {
+  const res = { ...localMap };
+  for (const [k, v] of Object.entries(remoteMap || {})) {
+    res[k] = Math.max(res[k] || 0, v || 0);
+  }
+  return res;
+}
+
+let cloudSyncTimer = null;
+function scheduleCloudPush() {
+  if (!state.cloudDbUrl) return;
+  if (cloudSyncTimer) clearTimeout(cloudSyncTimer);
+  cloudSyncTimer = setTimeout(() => pushToCloud(state.currentUser), 1000);
+}
+
+function updateSyncStatusUI() {
+  const badge = document.querySelector('.cloud-status-badge');
+  if (badge) {
+    badge.className = `cloud-status-badge ${state.cloudSyncStatus}`;
+    badge.textContent = state.cloudSyncStatus === 'synced' ? '🟢 已連線同步' : state.cloudSyncStatus === 'syncing' ? '🟡 同步中' : '⚪ 本機儲存';
+  }
+}
+
+async function pushToCloud(uid = state.currentUser) {
+  if (!state.cloudDbUrl) return;
+  const base = state.cloudDbUrl.replace(/\/+$/, '');
+  const payload = {
+    updatedAt: new Date().toISOString(),
+    errorBook: getErrorBook(uid),
+    errorCounts: getErrorCounts(uid),
+    correctCounts: getCorrectCounts(uid),
+    full_history: getFullHistory(uid)
+  };
+  try {
+    state.cloudSyncStatus = 'syncing';
+    updateSyncStatusUI();
+    const res = await fetch(`${base}/g6_science_users/${uid}.json`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (res.ok) {
+      state.cloudSyncStatus = 'synced';
+    } else {
+      state.cloudSyncStatus = 'offline';
+    }
+  } catch (e) {
+    state.cloudSyncStatus = 'offline';
+  }
+  updateSyncStatusUI();
+}
+
+async function syncFromCloud(uid = state.currentUser, notify = false) {
+  if (!state.cloudDbUrl) return;
+  const base = state.cloudDbUrl.replace(/\/+$/, '');
+  try {
+    state.cloudSyncStatus = 'syncing';
+    updateSyncStatusUI();
+    const res = await fetch(`${base}/g6_science_users/${uid}.json`);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    if (data && typeof data === 'object') {
+      // 1. 錯題本合併 (聯集去重)
+      const localEB = getErrorBook(uid);
+      const remoteEB = Array.isArray(data.errorBook) ? data.errorBook : [];
+      const mergedEB = [...new Set([...localEB, ...remoteEB])];
+      localStorage.setItem(getUserKey('errorBook', uid), JSON.stringify(mergedEB));
+
+      // 2. 作答次數合併 (取 Math.max，保證跨裝置數字永遠累加不倒退)
+      if (data.errorCounts) {
+        localStorage.setItem(getUserKey('errorCounts', uid), JSON.stringify(mergeCounts(getErrorCounts(uid), data.errorCounts)));
+      }
+      if (data.correctCounts) {
+        localStorage.setItem(getUserKey('correctCounts', uid), JSON.stringify(mergeCounts(getCorrectCounts(uid), data.correctCounts)));
+      }
+
+      // 3. 測驗歷程合併
+      if (Array.isArray(data.full_history) && data.full_history.length > getFullHistory(uid).length) {
+        localStorage.setItem(getUserKey('full_history', uid), JSON.stringify(data.full_history));
+      }
+
+      state.cloudSyncStatus = 'synced';
+      updateNavBadge();
+      updateNavUserUI();
+      if (notify) showToast('✅ 雲端最新進度與作答次數已同步完成！');
+      render();
+    } else {
+      // 遠端若無資料，將本地目前進度上傳備份
+      await pushToCloud(uid);
+      state.cloudSyncStatus = 'synced';
+      if (notify) showToast('☁️ 已將本機做題進度備份至 Firebase 雲端！');
+    }
+  } catch (e) {
+    state.cloudSyncStatus = 'offline';
+    if (notify) showToast('⚠️ 雲端連線失敗，目前使用本機離線儲存');
+  }
+  updateSyncStatusUI();
+}
+
+// 逐題做題流水帳（直推雲端，只寫不讀，供日後 AI 分析診斷）
+async function pushSlimLogToCloud(q, isCorrect, studentAnswer, durationSec) {
+  const nowStr = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false });
+  let optsStr = '';
+  if (q.type === 'mcq' && Array.isArray(q.options)) {
+    optsStr = q.options.map((o, idx) => `[${idx+1}] ${o.text}${o.isCorrect ? '*' : ''}`).join(' | ');
+  } else if (q.type === 'binary') {
+    optsStr = `正解: ${q.correctAnswer}`;
+  } else {
+    optsStr = `多選複選題`;
+  }
+
+  const entry = {
+    t: nowStr,
+    id: q.id,
+    sch: q.school || '',
+    domain: q.domain || '',
+    q: q.question,
+    opts: optsStr,
+    ans: Array.isArray(studentAnswer) ? studentAnswer.join('、') : String(studentAnswer),
+    res: isCorrect ? 'ok' : 'bad',
+    sec: durationSec || 1
+  };
+
+  // 本地輕量快取最近 200 筆流水帳
+  try {
+    const raw = localStorage.getItem(getUserKey('recent_answer_logs')) || '[]';
+    const arr = JSON.parse(raw);
+    arr.unshift(entry);
+    if (arr.length > 200) arr.length = 200;
+    localStorage.setItem(getUserKey('recent_answer_logs'), JSON.stringify(arr));
+  } catch (e) {}
+
+  // 獨立節點直推雲端 /g6_science_logs/${uid}/${timestamp}_${qid}.json
+  if (!state.cloudDbUrl) return;
+  const base = state.cloudDbUrl.replace(/\/+$/, '');
+  const uid = state.currentUser;
+  const logKey = `${Date.now()}_${q.id}`;
+  try {
+    await fetch(`${base}/g6_science_logs/${uid}/${logKey}.json`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(entry)
+    });
+  } catch (e) {}
+}
+
+function getErrorBook(uid = state.currentUser) {
+  try { return JSON.parse(localStorage.getItem(getUserKey('errorBook', uid)) || '[]'); }
+  catch { return []; }
+}
+function saveErrorBook(list, uid = state.currentUser) {
+  localStorage.setItem(getUserKey('errorBook', uid), JSON.stringify([...new Set(list)]));
+  updateNavBadge();
+  scheduleCloudPush();
+}
+
+function getErrorCounts(uid = state.currentUser) {
+  try { return JSON.parse(localStorage.getItem(getUserKey('errorCounts', uid)) || '{}'); }
+  catch { return {}; }
+}
+function saveErrorCounts(map, uid = state.currentUser) {
+  localStorage.setItem(getUserKey('errorCounts', uid), JSON.stringify(map));
+  scheduleCloudPush();
+}
+
+function getCorrectCounts(uid = state.currentUser) {
+  try { return JSON.parse(localStorage.getItem(getUserKey('correctCounts', uid)) || '{}'); }
+  catch { return {}; }
+}
+function saveCorrectCounts(map, uid = state.currentUser) {
+  localStorage.setItem(getUserKey('correctCounts', uid), JSON.stringify(map));
+  scheduleCloudPush();
+}
+
+function getFullHistory(uid = state.currentUser) {
+  try { return JSON.parse(localStorage.getItem(getUserKey('full_history', uid)) || '[]'); }
+  catch { return []; }
+}
+function appendFullHistory(entry, uid = state.currentUser) {
+  const history = getFullHistory(uid);
+  history.push(entry);
+  if (history.length > 1000) history.shift();
+  localStorage.setItem(getUserKey('full_history', uid), JSON.stringify(history));
+}
+
+function getNetError(qId, uid = state.currentUser) {
+  const ec = getErrorCounts(uid);
+  const cc = getCorrectCounts(uid);
+  return (ec[qId] || 0) - (cc[qId] || 0);
+}
+
+function getHeatClass(netError) {
+  if (netError >= 3) return 'heat-bad-heavy';
+  if (netError === 2) return 'heat-bad-mid';
+  if (netError === 1) return 'heat-bad-light';
+  if (netError === 0) return 'heat-tie';
+  if (netError === -1) return 'heat-ok-light';
+  return 'heat-ok-heavy';
+}
+
+function updateNavBadge() {
+  const eb = getErrorBook();
+  const el = document.getElementById('nav-error-count');
+  if (el) {
+    el.textContent = eb.length;
+    el.className = `pill ${eb.length === 0 ? 'zero' : ''}`;
+  }
+}
+
+function showToast(msg) {
+  const el = document.getElementById('toast');
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(el._timer);
+  el._timer = setTimeout(() => el.classList.remove('show'), 2200);
+}
+
+// ============================================================================
+// 2. 視圖切換與導覽 (Router)
+// ============================================================================
+function setView(view) {
+  state.view = view;
+  state.drawerOpen = false;
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+  render();
+}
+
+function render() {
+  const app = document.getElementById('app');
+  if (!app) return;
+  updateNavBadge();
+
+  if (state.view === 'dashboard') {
+    app.innerHTML = renderDashboardView();
+    bindDashboardEvents();
+  } else if (state.view === 'quiz') {
+    app.innerHTML = renderQuizView();
+    bindQuizEvents();
+  } else if (state.view === 'result') {
+    app.innerHTML = renderResultView();
+    bindResultEvents();
+  } else if (state.view === 'error_book') {
+    app.innerHTML = renderErrorBookView();
+    bindErrorBookEvents();
+  } else if (state.view === 'print') {
+    app.innerHTML = renderPrintView();
+    bindPrintEvents();
+  } else if (state.view === 'export') {
+    app.innerHTML = renderExportView();
+    bindExportEvents();
+  } else if (state.view === 'review') {
+    app.innerHTML = renderReviewView();
+    bindReviewEvents();
+  }
+}
+
+// ============================================================================
+// 3. 首頁儀表板 (Dashboard) — 9校真題收納為單一大卡片 EXAM_MID1
+// ============================================================================
+function getFilteredQuestions(unitId, schoolKey = state.examSchool) {
+  const bank = window.QUESTION_BANK || [];
+  if (unitId === 'EXAM_MID1') {
+    if (schoolKey === 'ALL') {
+      return bank.filter(q => q.unitId === 'EXAM_MID1');
+    }
+    return bank.filter(q => q.unitId === 'EXAM_MID1' && q.schoolKey === schoolKey);
+  }
+  return bank.filter(q => q.unitId === unitId);
+}
+
+function getUnitStats(unitId, schoolKey = state.examSchool) {
+  const pool = getFilteredQuestions(unitId, schoolKey);
+  const eb = getErrorBook();
+  const ccMap = getCorrectCounts();
+  const ecMap = getErrorCounts();
+  
+  const errCount = pool.filter(q => eb.includes(q.id)).length;
+  const mastered = pool.filter(q => (ccMap[q.id] || 0) >= 2 && !(ecMap[q.id] > 0)).length;
+  const pct = pool.length > 0 ? Math.round((mastered / pool.length) * 100) : 0;
+  return { total: pool.length, errCount, mastered, pct };
+}
+
+function getGlobalStats() {
+  const bank = window.QUESTION_BANK || [];
+  const eb = getErrorBook();
+  const ccMap = getCorrectCounts();
+  const ecMap = getErrorCounts();
+  const mastered = bank.filter(q => (ccMap[q.id] || 0) >= 2 && !(ecMap[q.id] > 0)).length;
+  const pct = bank.length > 0 ? Math.round((mastered / bank.length) * 100) : 0;
+  return { total: bank.length, mastered, pct, errors: eb.length };
+}
+
+function renderDashboardView() {
+  const g = getGlobalStats();
+  const curUser = getCurrentUserObj();
+  const lessons = window.LESSONS || [];
+  const schools = window.EXAM_SCHOOLS || [];
+
+  const unitCardsHtml = lessons.map(u => {
+    const isExamUnit = !!u.isExam;
+    const st = getUnitStats(u.id);
+    const isLocked = st.total === 0;
+
+    return `
+      <article class="unit-card ${isExamUnit ? 'exam-card' : ''} ${isLocked ? 'locked' : ''}">
+        <span class="u-no">${isExamUnit ? '🏆 段考特訓' : `LESSON ${String(u.no).padStart(2, '0')}`} · ${u.pages}</span>
+        <h3>${u.title}</h3>
+        <p>${u.description}</p>
+        
+        <div class="progress" title="掌握度 ${st.pct}%"><i style="width: ${st.pct}%"></i></div>
+        
+        <div class="u-meta">
+          <span class="tag ${st.pct === 100 ? 'ok' : ''}">掌握 ${st.pct}%</span>
+          ${st.errCount > 0 ? `<span class="tag bad">🔥 ${st.errCount} 題待消滅</span>` : ''}
+          ${isExamUnit ? `<span class="tag exam-badge">🏆 9校全真考卷</span>` : ''}
+          <span class="tag">${st.total} 題</span>
+        </div>
+
+        ${isExamUnit ? `
+          <div class="exam-card-quick-select">
+            <select class="exam-school-select" id="exam-school-select">
+              ${schools.map(s => `
+                <option value="${s.id}" ${state.examSchool === s.id ? 'selected' : ''}>
+                  ${s.shortName} (${s.count || 0} 題)
+                </option>
+              `).join('')}
+            </select>
+          </div>
+        ` : ''}
+
+        <div class="unit-actions-row">
+          <button class="btn btn-primary" style="flex-grow: 1;" data-start-unit="${u.id}" ${isLocked ? 'disabled' : ''}>
+            ${isExamUnit ? '🏆 開始段考' : '開始特訓'}
+          </button>
+          <button class="btn btn-secondary btn-review" data-review-unit="${u.id}">
+            📖 重點複習
+          </button>
+          ${st.errCount > 0 ? `
+            <button class="btn btn-ghost" style="color: var(--bad); border-color: var(--bad);" data-kill-unit-errors="${u.id}">
+              🔥 消滅錯題 (${st.errCount})
+            </button>
+          ` : ''}
+          <button class="btn btn-ghost" data-print-unit="${u.id}" ${isLocked ? 'disabled' : ''}>
+            🖨️ A4
+          </button>
+        </div>
+      </article>
+    `;
+  }).join('');
+
+  return `
+    <div class="view dashboard-view">
+      <div class="dashboard-hero">
+        <div class="hero-header">
+          <div>
+            <h2>${curUser.icon} ${curUser.name} 的六上自然特訓 🔬</h2>
+            <p>108課綱 康軒版核心概念 × 9所名校第一次段考全真題庫</p>
+          </div>
+          <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+            <button class="btn btn-secondary btn-lg" id="btn-quick-review">📖 第一次段考精華重點</button>
+            <button class="btn btn-primary btn-lg" id="btn-quick-start">🚀 隨機特訓 20 題</button>
+          </div>
+        </div>
+        
+        <div class="stats-grid">
+          <div class="stat-pill"><small>全冊掌握度</small><b style="color: var(--primary)">${g.pct}%</b></div>
+          <div class="stat-pill"><small>上線總題數</small><b>${g.total} 題</b></div>
+          <div class="stat-pill"><small>徹底精通題</small><b style="color: var(--ok)">${g.mastered} 題</b></div>
+          <div class="stat-pill"><small>待消滅錯題</small><b style="color: ${g.errors > 0 ? 'var(--bad)' : 'var(--ink)'}">${g.errors} 題</b></div>
+        </div>
+      </div>
+
+      <div class="section-title">
+        <h2>📚 課次與段考進度地圖</h2>
+        <span class="muted">康軒版六上 · 單元概念 ＋ 第一次段考（9校全真真題）</span>
+      </div>
+
+      <div class="unit-grid">
+        ${unitCardsHtml}
+      </div>
+    </div>
+  `;
+}
+
+function bindDashboardEvents() {
+  // 學校快選切換
+  document.getElementById('exam-school-select')?.addEventListener('change', (e) => {
+    state.examSchool = e.target.value;
+    render();
+  });
+
+  // 快捷重點精華複習
+  document.getElementById('btn-quick-review')?.addEventListener('click', () => {
+    state.currentReviewUnitId = 'EXAM_MID1';
+    setView('review');
+  });
+
+  // 隨機特訓
+  document.getElementById('btn-quick-start')?.addEventListener('click', () => {
+    const bank = window.QUESTION_BANK || [];
+    if (bank.length === 0) return showToast('題庫加載中');
+    const shuffled = [...bank].sort(() => Math.random() - 0.5).slice(0, 20);
+    startQuizSession('隨機綜合特訓', '20題 綜合實戰測試', shuffled, 'all', 'EXAM_MID1');
+  });
+
+  // 單元重點複習
+  document.querySelectorAll('[data-review-unit]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const uId = btn.getAttribute('data-review-unit');
+      state.currentReviewUnitId = uId;
+      setView('review');
+    });
+  });
+
+  // 開始單元/段考
+  document.querySelectorAll('[data-start-unit]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const uId = btn.getAttribute('data-start-unit');
+      const qs = getFilteredQuestions(uId, state.examSchool);
+      if (qs.length === 0) return showToast('此範圍題目整理中');
+      
+      const uObj = (window.LESSONS || []).find(x => x.id === uId);
+      const sObj = (window.EXAM_SCHOOLS || []).find(x => x.id === state.examSchool);
+      const title = uId === 'EXAM_MID1' ? `${sObj ? sObj.shortName : '第一次段考'} 試卷` : uObj.title;
+      const subtitle = uId === 'EXAM_MID1' ? '9校真題全真模考' : uObj.description;
+      startQuizSession(title, subtitle, qs, 'unit', uId);
+    });
+  });
+
+  // 消滅單元錯題
+  document.querySelectorAll('[data-kill-unit-errors]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const uId = btn.getAttribute('data-kill-unit-errors');
+      const eb = getErrorBook();
+      const qs = getFilteredQuestions(uId, state.examSchool).filter(q => eb.includes(q.id));
+      if (qs.length === 0) return showToast('目前沒有錯題！');
+      startQuizSession('錯題消滅特訓', '徹底搞懂剛剛失誤的題目', qs, 'error_book', uId);
+    });
+  });
+
+  // 列印單元試卷
+  document.querySelectorAll('[data-print-unit]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const uId = btn.getAttribute('data-print-unit');
+      state.currentUnitId = uId;
+      setView('print');
+    });
+  });
+}
+
+// ============================================================================
+// 4. 測驗執行邏輯 (Quiz Engine) — 頂部折疊題號盤 ＋ 學校標籤切換列
+// ============================================================================
+
+// 題目對應重點章節智慧匹配
+function getReviewTopicForQuestion(q) {
+  const reviews = window.UNIT_REVIEWS;
+  if (!reviews) return null;
+  
+  const text = ((q.domain || '') + ' ' + (q.question || '') + ' ' + (q.title || '')).toLowerCase();
+  
+  // 1. 導電 / LED / 電解質
+  if (text.includes('導電') || text.includes('led') || text.includes('二極體') || text.includes('電路') || text.includes('通路')) {
+    const sec = reviews['U2'].sections[1];
+    return {
+      unitId: 'U2',
+      unitTitle: '第二單元 水溶液的奧祕',
+      secIndex: 1,
+      secTitle: sec.title,
+      content: sec.content
+    };
+  }
+  // 2. 酸鹼中和 / 胃藥 / 水垢 / 尿垢 / 清潔劑 / 石灰
+  if (text.includes('中和') || text.includes('胃藥') || text.includes('水垢') || text.includes('尿垢') || text.includes('清潔劑') || text.includes('石灰') || text.includes('酸和鹼')) {
+    const sec = reviews['U2'].sections[3];
+    return {
+      unitId: 'U2',
+      unitTitle: '第二單元 水溶液的奧祕',
+      secIndex: 3,
+      secTitle: sec.title,
+      content: sec.content
+    };
+  }
+  // 3. 指示劑 / 石蕊 / 蝶豆花 / 紫甘藍 / 紫高麗菜
+  if (text.includes('石蕊') || text.includes('指示劑') || text.includes('蝶豆花') || text.includes('花青素') || text.includes('紫高麗菜') || text.includes('酸鹼性') || text.includes('變色')) {
+    const sec = reviews['U2'].sections[2];
+    return {
+      unitId: 'U2',
+      unitTitle: '第二單元 水溶液的奧祕',
+      secIndex: 2,
+      secTitle: sec.title,
+      content: sec.content
+    };
+  }
+  // 4. 溶質 / 溶劑 / 溶解 / 重量 / 守恆 / 結晶 / 析出 / 蒸發
+  if (text.includes('溶質') || text.includes('溶劑') || text.includes('溶解') || text.includes('守恆') || text.includes('結晶') || text.includes('水溶液') || text.includes('混合物')) {
+    const sec = reviews['U2'].sections[0];
+    return {
+      unitId: 'U2',
+      unitTitle: '第二單元 水溶液的奧祕',
+      secIndex: 0,
+      secTitle: sec.title,
+      content: sec.content
+    };
+  }
+  // 5. 颱風 / 氣旋 / 颱風眼 / 風速 / 防颱
+  if (text.includes('颱風') || text.includes('熱帶性低氣壓') || text.includes('颱風眼') || text.includes('防颱') || text.includes('白鹿') || text.includes('杜鵑') || text.includes('楊柳') || text.includes('泰利')) {
+    const sec = reviews['U1'].sections[3];
+    return {
+      unitId: 'U1',
+      unitTitle: '第一單元 天氣的變化',
+      secIndex: 3,
+      secTitle: sec.title,
+      content: sec.content
+    };
+  }
+  // 6. 冷鋒 / 暖鋒 / 滯留鋒 / 梅雨 / 天氣圖 / 高氣壓 / 低氣壓 / 氣團 / 等壓線 / 百帕
+  if (text.includes('鋒') || text.includes('天氣圖') || text.includes('氣團') || text.includes('氣壓') || text.includes('等壓線') || text.includes('百帕') || text.includes('梅雨')) {
+    const sec = reviews['U1'].sections[2];
+    return {
+      unitId: 'U1',
+      unitTitle: '第一單元 天氣的變化',
+      secIndex: 2,
+      secTitle: sec.title,
+      content: sec.content
+    };
+  }
+  // 7. 露 / 霜 / 冰塊加鹽 / 培養皿
+  if (text.includes('露') || text.includes('霜') || text.includes('冰塊加') || text.includes('食鹽降溫') || text.includes('冰晶')) {
+    const sec = reviews['U1'].sections[1];
+    return {
+      unitId: 'U1',
+      unitTitle: '第一單元 天氣的變化',
+      secIndex: 1,
+      secTitle: sec.title,
+      content: sec.content
+    };
+  }
+  // 8. 暖化 / 溫室氣體 / 碳足跡 / 水足跡 / 氣候變遷 / 聖嬰 / 永續
+  if (text.includes('暖化') || text.includes('溫室') || text.includes('碳足跡') || text.includes('水足跡') || text.includes('氣候變遷') || text.includes('聖嬰') || text.includes('二氧化碳') || text.includes('甲烷')) {
+    const sec = reviews['U1'].sections[4];
+    return {
+      unitId: 'U1',
+      unitTitle: '第一單元 天氣的變化',
+      secIndex: 4,
+      secTitle: sec.title,
+      content: sec.content
+    };
+  }
+  // 9. 雲 / 霧 / 雨 / 雪 / 水蒸氣 / 水循環 / 蒸發 / 凝結 / 凝固 / 昇華
+  if (text.includes('雲') || text.includes('霧') || text.includes('水蒸氣') || text.includes('水循環') || text.includes('白煙') || text.includes('凝結') || text.includes('蒸發')) {
+    const sec = reviews['U1'].sections[0];
+    return {
+      unitId: 'U1',
+      unitTitle: '第一單元 天氣的變化',
+      secIndex: 0,
+      secTitle: sec.title,
+      content: sec.content
+    };
+  }
+
+  // 預設 fallback 到段考錦囊
+  const sec = reviews['EXAM_MID1'].sections[0];
+  return {
+    unitId: 'EXAM_MID1',
+    unitTitle: '🏆 第一次段考衝刺錦囊',
+    secIndex: 0,
+    secTitle: sec.title,
+    content: sec.content
+  };
+}
+
+// 選擇題各選項深度逐項解析
+function renderOptionsExplanationHtml(q) {
+  if (!q.options || q.options.length === 0) return '';
+  
+  const qText = (q.question || '') + ' ' + (q.title || '');
+  const isAskingWrong = qText.includes('錯誤') || qText.includes('不是') || qText.includes('不正確') || qText.includes('何者非') || qText.includes('無法');
+  
+  const itemsHtml = q.options.map((opt, idx) => {
+    const num = idx + 1;
+    const isCorrectChoice = opt.isCorrect;
+    
+    let badgeClass = '';
+    let badgeText = '';
+    if (isAskingWrong) {
+      if (isCorrectChoice) {
+        badgeClass = 'opt-badge-wrong-target';
+        badgeText = '🔴 錯誤敘述（符合題目所求之正解）';
+      } else {
+        badgeClass = 'opt-badge-correct-fact';
+        badgeText = '🟢 正確敘述（符合客觀科學事實）';
+      }
+    } else {
+      if (isCorrectChoice) {
+        badgeClass = 'opt-badge-correct-target';
+        badgeText = '🟢 正確選項（本題標準答案）';
+      } else {
+        badgeClass = 'opt-badge-wrong-fact';
+        badgeText = '🔴 錯誤選項（敘述與事實不符）';
+      }
+    }
+
+    let explanationText = opt.explanation || '';
+    if (!explanationText) {
+      if (isCorrectChoice) {
+        explanationText = q.coreConcept || '符合課本核心科學原理與實驗觀察。';
+      } else {
+        explanationText = q.misconception || '此敘述與客觀科學事實或實驗安全規範不符。';
+      }
+    }
+
+    return `
+      <div class="opt-exp-row ${isCorrectChoice ? 'is-target-choice' : ''}">
+        <div class="opt-exp-header">
+          <span class="opt-exp-num">${num}</span>
+          <span class="opt-exp-text">${escapeHtml(opt.text)}</span>
+          <span class="opt-exp-badge ${badgeClass}">${badgeText}</span>
+        </div>
+        <div class="opt-exp-detail">
+          ${escapeHtml(explanationText)}
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  return `
+    <div class="options-deep-breakdown">
+      <div class="breakdown-title">
+        <span class="breakdown-icon">🔍</span>
+        <b>各選項深度逐項解析（對的為什麼對・錯的為什麼錯）</b>
+      </div>
+      <div class="breakdown-list">
+        ${itemsHtml}
+      </div>
+    </div>
+  `;
+}
+
+// 是非題判斷理由詳解
+function renderBinaryExplanationHtml(q) {
+  const isO = q.correctAnswer === '○';
+  return `
+    <div class="options-deep-breakdown binary-breakdown">
+      <div class="breakdown-title">
+        <span class="breakdown-icon">🔍</span>
+        <b>是非判斷理由詳解</b>
+      </div>
+      <div class="binary-exp-card ${isO ? 'binary-is-true' : 'binary-is-false'}">
+        <div class="binary-exp-status">
+          ${isO ? '🟢 本題敘述【正確 ○】' : '🔴 本題敘述【錯誤 ✕】'}
+        </div>
+        <div class="binary-exp-content">
+          ${isO 
+            ? `<b>科學依據：</b>${escapeHtml(q.coreConcept || '敘述完全符合客觀科學事實與課本實驗規範。')}`
+            : `<b>錯在哪裡 / 陷阱剖析：</b>${escapeHtml(q.misconception || q.coreConcept || '敘述中含有常見名校考卷陷阱，請注意關鍵字判定。')}`
+          }
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// 多選題逐項判定
+function renderMultiExplanationHtml(q) {
+  if (!q.options || q.options.length === 0) return '';
+  return `
+    <div class="options-deep-breakdown">
+      <div class="breakdown-title">
+        <span class="breakdown-icon">🔍</span>
+        <b>勾選項目逐項判定（應勾選 vs 不應勾選）</b>
+      </div>
+      <div class="breakdown-list">
+        ${q.options.map((opt, idx) => `
+          <div class="opt-exp-row ${opt.isCorrect ? 'is-target-choice' : ''}">
+            <div class="opt-exp-header">
+              <span class="opt-exp-num">${idx + 1}</span>
+              <span class="opt-exp-text">${escapeHtml(opt.text)}</span>
+              <span class="opt-exp-badge ${opt.isCorrect ? 'opt-badge-correct-target' : 'opt-badge-wrong-fact'}">
+                ${opt.isCorrect ? '✔ 應勾選' : '✖ 不應勾選'}
+              </span>
+            </div>
+            <div class="opt-exp-detail">
+              ${escapeHtml(opt.explanation || (opt.isCorrect ? q.coreConcept : q.misconception || '此項不符合題目條件要求。'))}
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+// 本題重點整理延伸伸縮折疊標籤
+function renderReviewAccordionHtml(q) {
+  const topic = getReviewTopicForQuestion(q);
+  if (!topic) return '';
+
+  return `
+    <div class="exp-review-accordion" id="exp-review-accordion">
+      <button type="button" class="btn-toggle-review-exp" id="btn-toggle-review-exp" aria-expanded="false">
+        <div class="review-toggle-left">
+          <span class="review-toggle-icon">📖</span>
+          <span class="review-toggle-title">本題重點整理延伸：<b>${escapeHtml(topic.secTitle)}</b></span>
+        </div>
+        <span class="review-toggle-pill" id="review-toggle-pill">點擊展開複習 ▾</span>
+      </button>
+      <div class="review-exp-drawer" id="review-exp-drawer" style="display: none;">
+        <div class="review-exp-drawer-inner">
+          <div class="review-exp-drawer-head">
+            <span class="review-topic-badge">${escapeHtml(topic.unitTitle)}</span>
+            <button type="button" class="btn-goto-full-review" data-goto-unit="${topic.unitId}" data-goto-sec="${topic.secIndex}">
+              ↗ 前往完整講義與實驗總表
+            </button>
+          </div>
+          <div class="review-exp-drawer-body">
+            ${formatReviewMarkdown(topic.content)}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+function startQuizSession(title, subtitle, questions, mode, unitId = 'EXAM_MID1') {
+  state.quizTitle = title;
+  state.quizSubtitle = subtitle;
+  state.quizMode = mode;
+  state.currentUnitId = unitId;
+  state.quizQuestions = questions;
+  state.quizIndex = 0;
+  state.answers = {};
+  state.multiSelections = {};
+  state.drawerOpen = false;
+  state.sessionStartTime = Date.now();
+  state.questionStartTime = Date.now();
+  setView('quiz');
+}
+
+function renderQuizView() {
+  const qs = state.quizQuestions;
+  if (!qs || qs.length === 0) {
+    return `
+      <div class="view" style="text-align:center; padding: 60px 0;">
+        <h2>目前沒有可測驗的題目</h2>
+        <button class="btn btn-primary" onclick="setView('dashboard')">返回首頁</button>
+      </div>
+    `;
+  }
+
+  const idx = state.quizIndex;
+  const q = qs[idx];
+  const cur = idx + 1;
+  const total = qs.length;
+  const pct = Math.round((cur / total) * 100);
+
+  const qAns = state.answers[q.id];
+  const isAnswered = !!qAns;
+
+  const ecMap = getErrorCounts();
+  const ccMap = getCorrectCounts();
+  const inErrorBook = getErrorBook().includes(q.id);
+
+  // 1. 段考學校切換標籤 (schoolTabsHtml) — 當在 EXAM_MID1 時呈現
+  let schoolTabsHtml = '';
+  if (state.currentUnitId === 'EXAM_MID1') {
+    const schools = window.EXAM_SCHOOLS || [];
+    schoolTabsHtml = `
+      <div class="exam-school-tabs-wrap">
+        <div class="exam-tabs-header">🏫 切換段考學校試卷：</div>
+        <div class="exam-school-tabs">
+          ${schools.map(s => `
+            <button type="button" class="school-tab-btn ${state.examSchool === s.id ? 'active' : ''}" data-school-tab="${s.id}">
+              <span>${s.shortName}</span>
+              <span class="badge-cnt">${s.count || 0}</span>
+            </button>
+          `).join('')}
+        </div>
+      </div>
+    `;
+  }
+
+  // 2. 題號速跳抽屜盤（位於題目正上方，46x42px，淨錯誤深淺色階）
+  const drawerBtnsHtml = qs.map((item, i) => {
+    const curCls = i === idx ? 'current' : '';
+    const errCnt = ecMap[item.id] || 0;
+    const okCnt = ccMap[item.id] || 0;
+    const netErr = errCnt - okCnt;
+    const heatCls = (errCnt > 0 || okCnt > 0) ? getHeatClass(netErr) : 'heat-tie';
+
+    return `
+      <button type="button" class="drawer-q-btn ${heatCls} ${curCls}" data-jump-idx="${i}" title="第 ${i + 1} 題：答對 ${okCnt} 次 · 答錯 ${errCnt} 次 (淨錯 ${netErr})">
+        ${okCnt > 0 ? `<span class="q-badge-ok">${okCnt}</span>` : ''}
+        ${errCnt > 0 ? `<span class="q-badge-bad">${errCnt}</span>` : ''}
+        <span class="q-num-center">${i + 1}</span>
+      </button>
+    `;
+  }).join('');
+
+  return `
+    <div class="view quiz-view">
+      <!-- 學校切換標籤列 -->
+      ${schoolTabsHtml}
+
+      <!-- 測驗頂部導覽列 -->
+      <div class="quiz-head">
+        <div class="quiz-nav-left">
+          <button type="button" class="btn btn-ghost btn-sm" id="btn-quit-quiz">← 返回</button>
+          <span class="crumb">${state.quizTitle}</span>
+        </div>
+        <div class="progress" title="進度 ${pct}%"><i style="width: ${pct}%"></i></div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <button type="button" class="btn btn-ghost btn-sm" id="btn-prev-q-top" ${idx === 0 ? 'disabled' : ''}>← 上一題</button>
+          <button type="button" class="count-badge-btn" id="btn-toggle-drawer" title="展開題號速跳盤">
+            🔢 第 ${cur} / ${total} 題 ▾
+          </button>
+          <button type="button" class="btn btn-ghost btn-sm" id="btn-next-q-top">
+            ${cur === total ? '結算 🏁' : '下一題 →'}
+          </button>
+        </div>
+      </div>
+
+      <!-- 頂部嵌入式折疊題號盤 (Grid Drawer — 位於題目正上方) -->
+      <div id="quiz-grid-drawer" class="quiz-grid-drawer" style="display: ${state.drawerOpen ? 'block' : 'none'};">
+        <div class="grid-drawer-head">
+          <div class="drawer-legend-bar">
+            <span class="leg-item"><b class="leg-dot ok"></b> 綠小字=答對次數</span>
+            <span class="leg-item"><b class="leg-dot bad"></b> 紅小字=答錯次數</span>
+            <span class="leg-item"><b class="leg-dot red-shade"></b> 底色越紅代表錯越多</span>
+          </div>
+          <button type="button" class="btn-close-drawer" id="btn-close-drawer">✕</button>
+        </div>
+        <div class="drawer-q-grid">
+          ${drawerBtnsHtml}
+        </div>
+      </div>
+
+      <!-- 題目卡片 (.q-card) -->
+      <article class="q-card">
+        <div class="q-top-action-bar">
+          <div class="q-tags">
+            <span class="tag type">${q.type === 'binary' ? '是非題' : q.type === 'multi' ? '複選題' : '選擇題'}</span>
+            <span class="tag school">${q.school}</span>
+            <span class="tag">${q.domain || q.unitName}</span>
+            <span class="stars">${'★'.repeat(q.difficulty || 2)}</span>
+          </div>
+          <div style="display: flex; gap: 8px; align-items: center;">
+            ${q.examPageImage ? `
+              <button class="btn btn-sm btn-ghost btn-view-exam-page" data-page-img="${q.examPageImage}" title="查看整頁考卷原稿" type="button">
+                📄 考卷原稿
+              </button>
+            ` : ''}
+            <button class="btn btn-sm btn-ghost" id="btn-toggle-bookmark" style="${inErrorBook ? 'color: var(--bad); border-color: var(--bad);' : ''}">
+              ${inErrorBook ? '🔥 已在錯題本' : '＋ 存入錯題本'}
+            </button>
+          </div>
+        </div>
+
+        <!-- 閱讀短文 / 背景情境 -->
+        ${q.passage ? `
+          <div class="reading-passage">
+            <div class="passage-header">📖 閱讀短文 / 背景資料</div>
+            <div class="passage-content">${escapeHtml(q.passage)}</div>
+          </div>
+        ` : ''}
+
+        <div class="q-text">${escapeHtml(q.question)}</div>
+
+        <!-- 考卷截圖 / 實驗圖表 -->
+        ${q.image ? `
+          <div class="diagram-box">
+            <img src="${q.image}" alt="實驗圖表" class="diagram-img" data-caption="${escapeHtml(q.question)}" />
+            <span class="diagram-hint">🔍 點擊圖片可放大</span>
+          </div>
+        ` : ''}
+
+        <!-- 是非題大型選項鍵 (Binary) -->
+        ${q.type === 'binary' ? `
+          <div class="binary-options">
+            <button class="btn-binary val-o ${getBinaryBtnClass(q, '○')}" data-val="○" ${isAnswered ? 'disabled' : ''}>
+              ○
+              <span class="label">正確 (鍵盤: O 或 1)</span>
+            </button>
+            <button class="btn-binary val-x ${getBinaryBtnClass(q, '╳')}" data-val="╳" ${isAnswered ? 'disabled' : ''}>
+              ╳
+              <span class="label">錯誤 (鍵盤: X 或 2)</span>
+            </button>
+          </div>
+        ` : q.type === 'multi' ? `
+          <!-- 複選題勾選介面 (Multi-Select) -->
+          <div class="multi-options">
+            ${(q.options || []).map((opt, oIdx) => {
+              const optText = opt.text;
+              const curSet = state.multiSelections[q.id] || new Set();
+              const isChecked = curSet.has(optText);
+              let statusCls = '';
+              let badgeHtml = '';
+              if (isAnswered) {
+                const userSelected = (qAns.selected || []).includes(optText);
+                const shouldSelect = !!opt.isCorrect;
+                if (userSelected && shouldSelect) {
+                  statusCls = 'ans-correct';
+                  badgeHtml = '<span class="multi-status-badge" style="background:var(--ok); color:#fff;">✔ 正確勾選</span>';
+                } else if (userSelected && !shouldSelect) {
+                  statusCls = 'ans-wrong';
+                  badgeHtml = '<span class="multi-status-badge" style="background:var(--bad); color:#fff;">✘ 不應勾選</span>';
+                } else if (!userSelected && shouldSelect) {
+                  statusCls = 'ans-missed';
+                  badgeHtml = '<span class="multi-status-badge" style="background:#f59e0b; color:#fff;">⚠️ 漏選此項</span>';
+                }
+              } else if (isChecked) {
+                statusCls = 'checked';
+              }
+
+              const isBoxChecked = isChecked || (isAnswered && (qAns.selected || []).includes(optText));
+              return `
+                <div class="btn-multi ${statusCls}" data-multi-opt="${escapeHtml(optText)}" ${isAnswered ? 'style="cursor:default;"' : ''}>
+                  <span class="multi-checkbox">${isBoxChecked ? '✔' : ''}</span>
+                  <span class="multi-text">${escapeHtml(optText)}</span>
+                  ${badgeHtml}
+                </div>
+              `;
+            }).join('')}
+          </div>
+          ${!isAnswered ? `
+            <div class="multi-submit-row">
+              <span class="multi-submit-hint">💡 本題為多選勾選題，請選取所有符合的選項後送出</span>
+              <button type="button" class="btn-multi-submit" id="btn-submit-multi" ${(state.multiSelections[q.id] || new Set()).size === 0 ? 'disabled' : ''}>
+                確認送出 (${(state.multiSelections[q.id] || new Set()).size} 項)
+              </button>
+            </div>
+          ` : ''}
+        ` : `
+          <!-- 選擇題四選一 (MCQ) -->
+          <div class="mcq-options">
+            ${q.options.map((opt, oIdx) => {
+              const optNum = oIdx + 1;
+              const btnClass = getMcqBtnClass(q, opt, isAnswered);
+              return `
+                <button class="btn-mcq ${btnClass}" data-opt-idx="${oIdx}" ${isAnswered ? 'disabled' : ''}>
+                  <span class="opt-idx">${optNum}</span>
+                  <span>${escapeHtml(opt.text)}</span>
+                </button>
+              `;
+            }).join('')}
+          </div>
+        `}
+
+        <!-- 答題詳解區：各選項深度剖析 ＋ 雙色教研詳解 ＋ 重點整理延伸折疊標籤 -->
+        ${isAnswered ? `
+          <!-- 1. 深度選項剖析（對的為什麼對・錯的為什麼錯） -->
+          ${q.type === 'mcq' ? renderOptionsExplanationHtml(q) : q.type === 'binary' ? renderBinaryExplanationHtml(q) : renderMultiExplanationHtml(q)}
+
+          <!-- 2. 雙色教研詳解（核心觀念與迷思陷阱） -->
+          <div class="dual-explanation">
+            <div class="exp-core">
+              <b>🌿 核心科學觀念與原理</b>
+              <p>${escapeHtml(q.coreConcept || '依據課本實驗觀察與科學原理。')}</p>
+            </div>
+            ${q.misconception ? `
+              <div class="exp-trap">
+                <b>⚠️ 迷思陷阱 / 易錯剖析</b>
+                <p>${escapeHtml(q.misconception)}</p>
+              </div>
+            ` : ''}
+          </div>
+
+          <!-- 3. 本題重點整理延伸伸縮折疊標籤 -->
+          ${renderReviewAccordionHtml(q)}
+        ` : ''}
+      </article>
+
+      <!-- 測驗底部導覽 -->
+      <div class="quiz-bottom-nav">
+        <div style="display:flex; gap:8px;">
+          <button type="button" class="btn btn-ghost" id="btn-prev-q" ${idx === 0 ? 'disabled' : ''}>← 上一題</button>
+          <button type="button" class="btn btn-ghost" id="btn-bottom-drawer">🔢 題號盤</button>
+        </div>
+        <button type="button" class="btn ${isAnswered ? 'btn-primary btn-lg' : 'btn-ghost'}" id="btn-next-q">
+          ${cur === total ? '完成測驗並結算 🏁' : isAnswered ? '進入下一題 →' : '跳過，看下一題 →'}
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function getBinaryBtnClass(q, val) {
+  const ans = state.answers[q.id];
+  if (!ans) return '';
+  const correctVal = q.correctAnswer;
+  if (ans.selected === val) {
+    return ans.result === 'ok' ? 'selected-correct' : 'selected-wrong';
+  }
+  if (val === correctVal) return 'selected-correct';
+  return '';
+}
+
+function getMcqBtnClass(q, opt, isAnswered) {
+  if (!isAnswered) return '';
+  const ans = state.answers[q.id];
+  if (ans && ans.selected === opt.text) {
+    return opt.isCorrect ? 'selected-correct' : 'selected-wrong';
+  }
+  if (opt.isCorrect) return 'selected-correct';
+  return '';
+}
+
+function bindQuizEvents() {
+  const handleNext = () => {
+    if (state.quizIndex < state.quizQuestions.length - 1) {
+      state.quizIndex++;
+      state.questionStartTime = Date.now();
+      render();
+    } else {
+      setView('result');
+    }
+  };
+  const handlePrev = () => {
+    if (state.quizIndex > 0) {
+      state.quizIndex--;
+      state.questionStartTime = Date.now();
+      render();
+    }
+  };
+
+  document.getElementById('btn-quit-quiz')?.addEventListener('click', () => setView('dashboard'));
+  document.getElementById('btn-prev-q-top')?.addEventListener('click', handlePrev);
+  document.getElementById('btn-prev-q')?.addEventListener('click', handlePrev);
+  document.getElementById('btn-next-q-top')?.addEventListener('click', handleNext);
+  document.getElementById('btn-next-q')?.addEventListener('click', handleNext);
+
+  // 頂部題號盤折疊開關 (點擊上方按鈕向下展開)
+  const toggleDrawer = () => {
+    state.drawerOpen = !state.drawerOpen;
+    const d = document.getElementById('quiz-grid-drawer');
+    if (d) d.style.display = state.drawerOpen ? 'block' : 'none';
+  };
+  document.getElementById('btn-toggle-drawer')?.addEventListener('click', toggleDrawer);
+  document.getElementById('btn-bottom-drawer')?.addEventListener('click', toggleDrawer);
+  document.getElementById('btn-close-drawer')?.addEventListener('click', () => {
+    state.drawerOpen = false;
+    const d = document.getElementById('quiz-grid-drawer');
+    if (d) d.style.display = 'none';
+  });
+
+  // 點擊題號盤按鈕跳轉
+  document.querySelectorAll('.drawer-q-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const targetIdx = parseInt(btn.getAttribute('data-jump-idx'), 10);
+      state.quizIndex = targetIdx;
+      state.drawerOpen = false;
+      state.questionStartTime = Date.now();
+      render();
+    });
+  });
+
+  // 學校切換標籤列 (schoolTabs)
+  document.querySelectorAll('.school-tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const schId = btn.getAttribute('data-school-tab');
+      state.examSchool = schId;
+      const filtered = getFilteredQuestions('EXAM_MID1', schId);
+      state.quizQuestions = filtered;
+      state.quizIndex = 0;
+      state.drawerOpen = false;
+      state.questionStartTime = Date.now();
+      render();
+    });
+  });
+
+  // 收藏/移除錯題本
+  document.getElementById('btn-toggle-bookmark')?.addEventListener('click', () => {
+    const q = state.quizQuestions[state.quizIndex];
+    const eb = getErrorBook();
+    if (eb.includes(q.id)) {
+      saveErrorBook(eb.filter(id => id !== q.id));
+      showToast('已從錯題本移除');
+    } else {
+      saveErrorBook([...eb, q.id]);
+      showToast('已存入錯題本 🔥');
+    }
+    render();
+  });
+
+  // 是非題作答
+  document.querySelectorAll('.btn-binary').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const val = btn.getAttribute('data-val');
+      submitAnswer(val);
+    });
+  });
+
+  // 選擇題作答
+  document.querySelectorAll('.btn-mcq').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const optIdx = parseInt(btn.getAttribute('data-opt-idx'), 10);
+      const q = state.quizQuestions[state.quizIndex];
+      const opt = q.options[optIdx];
+      if (opt) submitAnswer(opt.text, opt.isCorrect);
+    });
+  });
+
+  // 複選題項目點選 (切換選取狀態)
+  document.querySelectorAll('.btn-multi').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const q = state.quizQuestions[state.quizIndex];
+      if (state.answers[q.id]) return;
+      const optText = btn.getAttribute('data-multi-opt');
+      if (!state.multiSelections[q.id]) {
+        state.multiSelections[q.id] = new Set();
+      }
+      const set = state.multiSelections[q.id];
+      if (set.has(optText)) {
+        set.delete(optText);
+      } else {
+        set.add(optText);
+      }
+      render();
+    });
+  });
+
+  // 複選題送出答案
+  document.getElementById('btn-submit-multi')?.addEventListener('click', () => {
+    submitMultiAnswer();
+  });
+
+  // 圖片放大燈箱
+  document.querySelectorAll('.diagram-img').forEach(img => {
+    img.addEventListener('click', () => {
+      openLightbox(img.src, img.getAttribute('data-caption') || '');
+    });
+  });
+
+  // 查看考卷原稿
+  document.querySelectorAll('.btn-view-exam-page').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const src = btn.getAttribute('data-page-img');
+      const q = state.quizQuestions[state.quizIndex];
+      openLightbox(src, `${q.school} ${q.domain || ''} 原始考卷整頁對照`);
+    });
+  });
+
+  // 重點延伸伸縮折疊標籤開關
+  document.getElementById('btn-toggle-review-exp')?.addEventListener('click', () => {
+    const drawer = document.getElementById('review-exp-drawer');
+    const btn = document.getElementById('btn-toggle-review-exp');
+    const pill = document.getElementById('review-toggle-pill');
+    if (!drawer || !btn) return;
+    const isHidden = drawer.style.display === 'none';
+    drawer.style.display = isHidden ? 'block' : 'none';
+    if (isHidden) {
+      btn.classList.add('active');
+      if (pill) pill.textContent = '收起複習 ▴';
+    } else {
+      btn.classList.remove('active');
+      if (pill) pill.textContent = '點擊展開複習 ▾';
+    }
+  });
+
+  // 跳轉至完整講義對應章節
+  document.querySelectorAll('.btn-goto-full-review').forEach(btn => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const uId = btn.getAttribute('data-goto-unit');
+      const secIdx = btn.getAttribute('data-goto-sec');
+      state.currentReviewUnitId = uId;
+      setView('review');
+      setTimeout(() => {
+        const el = document.getElementById(`review-sec-${secIdx}`);
+        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 100);
+    });
+  });
+}
+
+function submitAnswer(selectedText, explicitCorrect) {
+  const q = state.quizQuestions[state.quizIndex];
+  if (state.answers[q.id]) return;
+
+  let isCorrect = false;
+  if (q.type === 'binary') {
+    isCorrect = (selectedText === q.correctAnswer);
+  } else {
+    if (explicitCorrect !== undefined) {
+      isCorrect = explicitCorrect;
+    } else {
+      const opt = (q.options || []).find(o => o.text === selectedText);
+      isCorrect = !!opt?.isCorrect;
+    }
+  }
+
+  const durationSec = Math.max(1, Math.round((Date.now() - state.questionStartTime) / 1000));
+  const ecMap = getErrorCounts();
+  const ccMap = getCorrectCounts();
+  const eb = getErrorBook();
+
+  if (isCorrect) {
+    ccMap[q.id] = (ccMap[q.id] || 0) + 1;
+    saveCorrectCounts(ccMap);
+  } else {
+    ecMap[q.id] = (ecMap[q.id] || 0) + 1;
+    saveErrorCounts(ecMap);
+    if (!eb.includes(q.id)) {
+      saveErrorBook([...eb, q.id]);
+    }
+  }
+
+  state.answers[q.id] = {
+    result: isCorrect ? 'ok' : 'bad',
+    selected: selectedText,
+    revealed: true,
+    timeSeconds: durationSec
+  };
+
+  appendFullHistory({
+    time: new Date().toISOString(),
+    qId: q.id,
+    type: q.type,
+    unitId: q.unitId,
+    school: q.school,
+    selected: selectedText,
+    isCorrect,
+    durationSec
+  });
+
+  pushSlimLogToCloud(q, isCorrect, selectedText, durationSec);
+
+  render();
+}
+
+function submitMultiAnswer() {
+  const q = state.quizQuestions[state.quizIndex];
+  if (state.answers[q.id]) return;
+
+  const userSelections = Array.from(state.multiSelections[q.id] || []);
+  if (userSelections.length === 0) {
+    showToast('請至少勾選一個選項後再送出！');
+    return;
+  }
+
+  const correctOpts = (q.options || []).filter(o => o.isCorrect).map(o => o.text);
+  
+  // 判定是否全對 (應選全選，且未多選錯項)
+  const isAllCorrect = (userSelections.length === correctOpts.length) &&
+                       userSelections.every(text => correctOpts.includes(text));
+
+  const durationSec = Math.max(1, Math.round((Date.now() - state.questionStartTime) / 1000));
+  const ecMap = getErrorCounts();
+  const ccMap = getCorrectCounts();
+  const eb = getErrorBook();
+
+  if (isAllCorrect) {
+    ccMap[q.id] = (ccMap[q.id] || 0) + 1;
+    saveCorrectCounts(ccMap);
+  } else {
+    ecMap[q.id] = (ecMap[q.id] || 0) + 1;
+    saveErrorCounts(ecMap);
+    if (!eb.includes(q.id)) {
+      saveErrorBook([...eb, q.id]);
+    }
+  }
+
+  state.answers[q.id] = {
+    result: isAllCorrect ? 'ok' : 'bad',
+    selected: userSelections,
+    revealed: true,
+    timeSeconds: durationSec
+  };
+
+  appendFullHistory({
+    time: new Date().toISOString(),
+    qId: q.id,
+    type: q.type,
+    unitId: q.unitId,
+    school: q.school,
+    selected: userSelections,
+    isCorrect: isAllCorrect,
+    durationSec
+  });
+
+  pushSlimLogToCloud(q, isAllCorrect, userSelections, durationSec);
+
+  render();
+}
+
+// ============================================================================
+// 5. 測驗結果視圖 (Result View)
+// ============================================================================
+function renderResultView() {
+  const qs = state.quizQuestions;
+  const answers = state.answers;
+  let correctCount = 0;
+  let wrongCount = 0;
+  let unreachedCount = 0;
+  const wrongQuestions = [];
+
+  qs.forEach(q => {
+    const ans = answers[q.id];
+    if (!ans) {
+      unreachedCount++;
+    } else if (ans.result === 'ok') {
+      correctCount++;
+    } else {
+      wrongCount++;
+      wrongQuestions.push(q);
+    }
+  });
+
+  const totalAnswered = correctCount + wrongCount;
+  const score = totalAnswered > 0 ? Math.round((correctCount / totalAnswered) * 100) : 0;
+
+  return `
+    <div class="view result-view" style="max-width: 640px; margin: 0 auto; text-align: center;">
+      <div class="glass" style="padding: 36px 24px;">
+        <span style="font-size: 54px; display: block; margin-bottom: 12px;">
+          ${score >= 90 ? '🏆' : score >= 70 ? '🌟' : '💪'}
+        </span>
+        <h2>${state.quizTitle} 測驗結算！</h2>
+        <p class="muted">${state.quizSubtitle}</p>
+
+        <div style="font-size: 58px; font-weight: 900; font-family: var(--font-num); color: ${score >= 80 ? 'var(--primary)' : 'var(--bad)'}; margin: 20px 0;">
+          ${score}<span style="font-size: 24px; color: var(--ink-3);">分</span>
+        </div>
+
+        <div class="stats-grid" style="margin-bottom: 28px;">
+          <div class="stat-pill"><small>答對</small><b style="color:var(--ok)">${correctCount} 題</b></div>
+          <div class="stat-pill"><small>答錯</small><b style="color:var(--bad)">${wrongCount} 題</b></div>
+          <div class="stat-pill"><small>跳過未作答</small><b>${unreachedCount} 題</b></div>
+        </div>
+
+        <div style="display: flex; gap: 12px; justify-content: center; flex-wrap: wrap;">
+          ${wrongQuestions.length > 0 ? `
+            <button class="btn btn-primary" id="btn-retry-wrongs">🔥 重刷本次錯題 (${wrongQuestions.length} 題)</button>
+          ` : ''}
+          <button class="btn btn-ghost" onclick="setView('dashboard')">返回主選單</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function bindResultEvents() {
+  document.getElementById('btn-retry-wrongs')?.addEventListener('click', () => {
+    const wrongQs = state.quizQuestions.filter(q => state.answers[q.id]?.result === 'bad');
+    startQuizSession('錯題即時消除', '針對剛剛失誤的題目重新強化', wrongQs, 'error_book', state.currentUnitId);
+  });
+}
+
+// ============================================================================
+// 6. 終身錯題本視圖 (Error Book)
+// ============================================================================
+function renderErrorBookView() {
+  const eb = getErrorBook();
+  const allQs = window.QUESTION_BANK || [];
+  let errorQuestions = allQs.filter(q => eb.includes(q.id));
+  if (state.errorFilterSchool !== 'ALL') {
+    errorQuestions = errorQuestions.filter(q => q.schoolKey === state.errorFilterSchool);
+  }
+  const schools = window.EXAM_SCHOOLS || [];
+
+  return `
+    <div class="view error-book-view">
+      <div class="section-title">
+        <div>
+          <h2>🔥 終身錯題本 (${errorQuestions.length} 題)</h2>
+          <span class="muted">消滅紅點、直到真正掌握所有易錯科學迷思</span>
+        </div>
+        <div style="display:flex; gap: 8px;">
+          ${errorQuestions.length > 0 ? `
+            <button class="btn btn-primary" id="btn-start-error-quiz">開始重刷錯題</button>
+          ` : ''}
+          <button class="btn btn-ghost" onclick="setView('dashboard')">返回首頁</button>
+        </div>
+      </div>
+
+      <!-- 學校快速過濾 -->
+      <div class="exam-school-tabs-wrap" style="margin-bottom: 20px;">
+        <div class="exam-tabs-header">🏫 依學校篩選錯題：</div>
+        <div class="exam-school-tabs">
+          ${schools.map(s => {
+            const cnt = s.id === 'ALL' ? allQs.filter(q => eb.includes(q.id)).length : allQs.filter(q => eb.includes(q.id) && q.schoolKey === s.id).length;
+            return `
+              <button type="button" class="school-tab-btn ${state.errorFilterSchool === s.id ? 'active' : ''}" data-error-school="${s.id}">
+                <span>${s.shortName}</span>
+                <span class="badge-cnt">${cnt}</span>
+              </button>
+            `;
+          }).join('')}
+        </div>
+      </div>
+
+      ${errorQuestions.length === 0 ? `
+        <div class="glass" style="text-align: center; padding: 60px 20px;">
+          <span style="font-size: 48px;">🎉</span>
+          <h3>太棒了！目前沒有任何待消滅的錯題</h3>
+          <p class="muted">繼續保持，在段考中奪得滿分！</p>
+          <button class="btn btn-primary" style="margin-top: 14px;" onclick="setView('dashboard')">前往刷題</button>
+        </div>
+      ` : `
+        <div style="display: flex; flex-direction: column; gap: 14px;">
+          ${errorQuestions.map((q, idx) => {
+            const ec = getErrorCounts()[q.id] || 0;
+            const cc = getCorrectCounts()[q.id] || 0;
+            return `
+              <article class="q-card" style="margin-bottom: 0;">
+                <div class="q-top-action-bar">
+                  <div class="q-tags">
+                    <span class="tag type">${q.type === 'binary' ? '是非' : '選擇'}</span>
+                    <span class="tag school">${q.school}</span>
+                    <span class="tag" style="background:#fee2e2; color:#b91c1c;">錯 ${ec} 次 · 對 ${cc} 次</span>
+                  </div>
+                  <button class="btn btn-ghost btn-sm btn-remove-error" data-qid="${q.id}">✓ 標記已熟練移出</button>
+                </div>
+                <div class="q-text" style="font-size: 16px; margin-bottom: 12px;">${idx + 1}. ${escapeHtml(q.question)}</div>
+                ${q.image ? `<div class="diagram-box" style="margin: 8px 0;"><img src="${q.image}" class="diagram-img" style="max-height: 180px;"></div>` : ''}
+                <div class="dual-explanation" style="margin-top: 10px; padding: 10px;">
+                  <div class="exp-core"><p><b>正解：</b>${escapeHtml(q.correctAnswer)} — ${escapeHtml(q.coreConcept || '')}</p></div>
+                  ${q.misconception ? `<div class="exp-trap"><p><b>陷阱剖析：</b>${escapeHtml(q.misconception)}</p></div>` : ''}
+                </div>
+              </article>
+            `;
+          }).join('')}
+        </div>
+      `}
+    </div>
+  `;
+}
+
+function bindErrorBookEvents() {
+  document.getElementById('btn-start-error-quiz')?.addEventListener('click', () => {
+    const eb = getErrorBook();
+    const allQs = window.QUESTION_BANK || [];
+    let qs = allQs.filter(q => eb.includes(q.id));
+    if (state.errorFilterSchool !== 'ALL') {
+      qs = qs.filter(q => q.schoolKey === state.errorFilterSchool);
+    }
+    startQuizSession('錯題專項複習', '徹底搞懂每個失誤點', qs, 'error_book', 'EXAM_MID1');
+  });
+
+  document.querySelectorAll('[data-error-school]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      state.errorFilterSchool = btn.getAttribute('data-error-school');
+      render();
+    });
+  });
+
+  document.querySelectorAll('.btn-remove-error').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const qId = btn.getAttribute('data-qid');
+      const eb = getErrorBook();
+      saveErrorBook(eb.filter(id => id !== qId));
+      showToast('已從錯題本移出 ✓');
+      render();
+    });
+  });
+}
+
+// ============================================================================
+// 7. A4 考卷列印 (Print View)
+// ============================================================================
+function renderPrintView() {
+  const allQs = window.QUESTION_BANK || [];
+  let sample = allQs;
+  if (state.currentUnitId === 'EXAM_MID1' && state.examSchool !== 'ALL') {
+    sample = allQs.filter(q => q.schoolKey === state.examSchool);
+  }
+  sample = sample.slice(0, 20);
+
+  const sObj = (window.EXAM_SCHOOLS || []).find(s => s.id === state.examSchool);
+  const schoolLabel = state.examSchool === 'ALL' ? '全臺名校段考精華卷' : (sObj ? sObj.name : '段考評量試卷');
+
+  return `
+    <div class="view print-view">
+      <div class="no-print section-title">
+        <div>
+          <h2>🖨️ A4 實體考卷生成與列印</h2>
+          <span class="muted">適合紙筆模擬段考與考前限時測驗</span>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button class="btn btn-primary" onclick="window.print()">🖨️ 立即列印</button>
+          <button class="btn btn-ghost" onclick="setView('dashboard')">返回</button>
+        </div>
+      </div>
+
+      <div class="print-page glass" style="background:#fff; color:#000; padding: 30px; border-radius: 8px;">
+        <div class="print-header" style="text-align:center; border-bottom: 2px solid #000; padding-bottom: 12px; margin-bottom: 20px;">
+          <h2 style="font-size: 19pt; margin-bottom: 4px;">國小六年級上學期 自然科學評量試卷</h2>
+          <p style="margin: 0; font-size: 11pt;">試卷來源：${schoolLabel} ｜ 得分：__________</p>
+          <div style="display: flex; justify-content: space-around; margin-top: 10px; font-size: 11pt;">
+            <span>六年 _____ 班</span>
+            <span>座號：_____ 號</span>
+            <span>姓名：_______________</span>
+          </div>
+        </div>
+
+        <div class="print-questions-flow">
+          ${sample.map((q, idx) => `
+            <div class="print-q-item" style="margin-bottom: 16px; font-size: 11pt; line-height: 1.6;">
+              <b>(${idx + 1}) [${q.type === 'binary' ? '是非題' : '選擇題'}]</b> ${escapeHtml(q.question)}
+              ${q.type === 'mcq' ? `
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-left: 20px; margin-top: 4px;">
+                  ${q.options.map((opt, oIdx) => `<span>①②③④`[oIdx] + ` ${escapeHtml(opt.text)}</span>`).join('')}
+                </div>
+              ` : `
+                <span style="float: right; margin-right: 20px;">( &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; )</span>
+              `}
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    </div>
+  `;
+}
+function bindPrintEvents() {}
+
+// ============================================================================
+// 8. AI Slim 日誌匯出中心 (AI Export)
+// ============================================================================
+function renderExportView() {
+  const history = getFullHistory();
+  const errorBook = getErrorBook();
+  const allQs = window.QUESTION_BANK || [];
+
+  const exportData = {
+    exportVersion: '2.0',
+    exportTime: new Date().toISOString(),
+    user: getCurrentUserObj(),
+    summary: {
+      totalQuestions: allQs.length,
+      historyLogCount: history.length,
+      currentErrorBookCount: errorBook.length
+    },
+    errorBookDetails: errorBook.map(id => {
+      const q = allQs.find(item => item.id === id);
+      return q ? {
+        id: q.id,
+        type: q.type,
+        school: q.school,
+        question: q.question,
+        correctAnswer: q.correctAnswer,
+        coreConcept: q.coreConcept,
+        misconception: q.misconception
+      } : { id };
+    }),
+    recentLogs: history.slice(-50)
+  };
+
+  const jsonStr = JSON.stringify(exportData, null, 2);
+
+  return `
+    <div class="view export-view" style="max-width: 800px; margin: 0 auto;">
+      <div class="section-title">
+        <div>
+          <h2>📤 匯出學習日誌給 AI</h2>
+          <span class="muted">複製此 JSON 貼給 AI 診斷弱點或量身訂做考題</span>
+        </div>
+        <button class="btn btn-ghost" onclick="setView('dashboard')">返回首頁</button>
+      </div>
+
+      <div class="glass" style="padding: 24px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+          <b>AI 自給自足 Slim JSON</b>
+          <button class="btn btn-primary btn-sm" id="btn-copy-json">📋 一鍵複製 JSON</button>
+        </div>
+        <textarea id="export-json-textarea" readonly style="width: 100%; height: 380px; font-family: monospace; font-size: 12px; padding: 12px; border-radius: 12px; border: 1px solid var(--line); background: #fdfdfd; resize: vertical;">${jsonStr}</textarea>
+      </div>
+    </div>
+  `;
+}
+
+function bindExportEvents() {
+  document.getElementById('btn-copy-json')?.addEventListener('click', () => {
+    const ta = document.getElementById('export-json-textarea');
+    if (ta) {
+      ta.select();
+      navigator.clipboard.writeText(ta.value).then(() => {
+        showToast('JSON 已複製到剪貼簿！可直接貼給 AI');
+      });
+    }
+  });
+}
+
+// ============================================================================
+// 10. 重點複習模組 (Review Engine) — 108課綱 康軒六上重點整理 ＋ 9校考點 100% 覆蓋
+// ============================================================================
+
+function formatReviewMarkdown(md) {
+  if (!md) return '';
+  const lines = md.split('\n');
+  const html = [];
+  let inTable = false;
+  let tableHeaders = [];
+  let tableRows = [];
+  let inList = false;
+  let listType = 'ul';
+
+  function closeList() {
+    if (inList) {
+      html.push(`</${listType}>`);
+      inList = false;
+    }
+  }
+
+  function closeTable() {
+    if (inTable) {
+      let tHtml = '<div class="review-table-wrap"><table class="review-table"><thead><tr>';
+      tableHeaders.forEach(h => {
+        tHtml += `<th>${inlineFormat(h)}</th>`;
+      });
+      tHtml += '</tr></thead><tbody>';
+      tableRows.forEach(row => {
+        tHtml += '<tr>';
+        row.forEach(cell => {
+          tHtml += `<td>${inlineFormat(cell)}</td>`;
+        });
+        tHtml += '</tr>';
+      });
+      tHtml += '</tbody></table></div>';
+      html.push(tHtml);
+      inTable = false;
+      tableHeaders = [];
+      tableRows = [];
+    }
+  }
+
+  function inlineFormat(text) {
+    if (!text) return '';
+    return text
+      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/➔/g, '<span class="arrow-sym">➔</span>');
+  }
+
+  for (let i = 0; i < lines.length; i++) {
+    const rawLine = lines[i];
+    const line = rawLine.trim();
+
+    // Markdown 表格處理
+    if (line.startsWith('|') && line.endsWith('|')) {
+      closeList();
+      const cells = line.split('|').slice(1, -1).map(c => c.trim());
+      // 判斷是否為分隔線 |:---|:---|
+      if (cells.every(c => /^:?-+:?$/.test(c))) {
+        continue;
+      }
+      if (!inTable) {
+        inTable = true;
+        tableHeaders = cells;
+      } else {
+        tableRows.push(cells);
+      }
+      continue;
+    } else {
+      closeTable();
+    }
+
+    // 空行
+    if (!line) {
+      closeList();
+      continue;
+    }
+
+    // 分隔線 ---
+    if (line === '---' || line === '***') {
+      closeList();
+      html.push('<hr class="review-divider">');
+      continue;
+    }
+
+    // 標題 ###
+    if (line.startsWith('### ')) {
+      closeList();
+      const hText = line.slice(4);
+      let hClass = 'review-h4';
+      if (hText.includes('🔬') || hText.includes('🧪')) hClass += ' review-h4-exp';
+      if (hText.includes('⚠️') || hText.includes('🔥')) hClass += ' review-h4-trap';
+      html.push(`<h4 class="${hClass}">${inlineFormat(hText)}</h4>`);
+      continue;
+    }
+    if (line.startsWith('## ')) {
+      closeList();
+      html.push(`<h3 class="review-h3">${inlineFormat(line.slice(3))}</h3>`);
+      continue;
+    }
+
+    // 醒目提示框 / 易錯陷阱 / 實驗
+    if (line.startsWith('⚠️') || line.startsWith('🔥 【易錯') || line.startsWith('🔥 【段考') || line.includes('【易錯陷阱】')) {
+      closeList();
+      html.push(`<div class="review-callout callout-trap"><div class="callout-icon">⚠️</div><div class="callout-content">${inlineFormat(line)}</div></div>`);
+      continue;
+    }
+    if (line.startsWith('🔬 【實驗') || line.startsWith('🧪 【實驗') || line.includes('【實驗操作】') || line.includes('【實驗拆解】')) {
+      closeList();
+      html.push(`<div class="review-callout callout-exp"><div class="callout-icon">🔬</div><div class="callout-content">${inlineFormat(line)}</div></div>`);
+      continue;
+    }
+    if (line.startsWith('💡 【名校') || line.startsWith('💡 【解題') || line.includes('【考點提示】')) {
+      closeList();
+      html.push(`<div class="review-callout callout-tip"><div class="callout-icon">💡</div><div class="callout-content">${inlineFormat(line)}</div></div>`);
+      continue;
+    }
+
+    // 清單項目 -
+    if (line.startsWith('- ') || line.startsWith('* ')) {
+      if (!inList || listType !== 'ul') {
+        closeList();
+        inList = true;
+        listType = 'ul';
+        html.push('<ul class="review-ul">');
+      }
+      const itemContent = line.slice(2);
+      let liClass = '';
+      if (itemContent.includes('⚠️') || itemContent.includes('【易錯')) liClass = ' class="review-li-trap"';
+      else if (itemContent.includes('🔬') || itemContent.includes('【實驗')) liClass = ' class="review-li-exp"';
+      else if (itemContent.includes('💡') || itemContent.includes('【名校')) liClass = ' class="review-li-tip"';
+      html.push(`<li${liClass}>${inlineFormat(itemContent)}</li>`);
+      continue;
+    }
+
+    // 數字清單 1. 2.
+    const numMatch = line.match(/^(\d+)\.\s+(.*)$/);
+    if (numMatch) {
+      if (!inList || listType !== 'ol') {
+        closeList();
+        inList = true;
+        listType = 'ol';
+        html.push('<ol class="review-ol">');
+      }
+      const itemContent = numMatch[2];
+      let liClass = '';
+      if (itemContent.includes('⚠️') || itemContent.includes('【易錯')) liClass = ' class="review-li-trap"';
+      else if (itemContent.includes('🔬') || itemContent.includes('【實驗')) liClass = ' class="review-li-exp"';
+      else if (itemContent.includes('💡') || itemContent.includes('【名校')) liClass = ' class="review-li-tip"';
+      html.push(`<li${liClass}>${inlineFormat(itemContent)}</li>`);
+      continue;
+    }
+
+    // 一般段落
+    closeList();
+    html.push(`<p class="review-p">${inlineFormat(line)}</p>`);
+  }
+
+  closeList();
+  closeTable();
+  return html.join('\n');
+}
+
+function renderReviewView() {
+  const reviews = window.UNIT_REVIEWS || {};
+  let curUnitId = state.currentReviewUnitId || 'U1';
+  if (!reviews[curUnitId]) {
+    curUnitId = 'U1';
+    state.currentReviewUnitId = 'U1';
+  }
+  const curUnit = reviews[curUnitId];
+
+  // 單元 Tabs
+  const tabUnits = [
+    { id: 'U1', title: '第一單元：天氣的變化', icon: '🌦️' },
+    { id: 'U2', title: '第二單元：水溶液的奧祕', icon: '🧪' },
+    { id: 'EXAM_MID1', title: '第一次段考：9校衝刺錦囊', icon: '🏆' }
+  ];
+
+  const tabsHtml = tabUnits.map(t => {
+    const isActive = t.id === curUnitId;
+    return `
+      <button type="button" class="review-tab-btn ${isActive ? 'active' : ''}" data-switch-review-tab="${t.id}">
+        <span>${t.icon}</span>
+        <span>${t.title}</span>
+      </button>
+    `;
+  }).join('');
+
+  // 章節 Quick Jump TOC
+  const sections = curUnit.sections || [];
+  const tocHtml = sections.map((sec, idx) => `
+    <a href="#review-sec-${idx}" class="review-toc-item">
+      ${escapeHtml(sec.title.split(' ')[0] || `小節 ${idx+1}`)}
+    </a>
+  `).join('');
+
+  // 章節卡片
+  const sectionsHtml = sections.map((sec, idx) => `
+    <article class="review-section-card" id="review-sec-${idx}">
+      <div class="review-section-header">
+        <h3>${escapeHtml(sec.title)}</h3>
+        <span class="review-sec-badge">重點主題 ${idx + 1}</span>
+      </div>
+      <div class="review-body">
+        ${formatReviewMarkdown(sec.content)}
+      </div>
+    </article>
+  `).join('');
+
+  // 測驗題數統計
+  const qsForThisUnit = getFilteredQuestions(curUnitId, 'ALL');
+  const qCount = qsForThisUnit.length;
+
+  return `
+    <div class="view review-view">
+      <!-- 頂部單元切換 Tabs -->
+      <nav class="review-nav-tabs" aria-label="重點複習單元切換">
+        ${tabsHtml}
+      </nav>
+
+      <!-- 單元 Hero 卡片 -->
+      <header class="review-hero">
+        <div class="review-hero-title-row">
+          <div>
+            <h2>${escapeHtml(curUnit.unitTitle)}</h2>
+            <p>${escapeHtml(curUnit.unitSubtitle)}</p>
+          </div>
+          <div class="review-hero-actions">
+            <button type="button" class="btn btn-primary" id="btn-review-start-quiz">
+              🎯 立即測驗此單元 (${qCount} 題)
+            </button>
+            <button type="button" class="btn btn-ghost" id="btn-review-print">
+              🖨️ A4 重點手冊
+            </button>
+            <button type="button" class="btn btn-ghost" id="btn-review-back-dash">
+              ← 回學習地圖
+            </button>
+          </div>
+        </div>
+
+        <div class="review-coverage-badge">
+          <span style="font-size: 20px;">🛡️</span>
+          <div>
+            <b>108課綱 康軒六上完整核心概念 ＋ 9校考點 100% 覆蓋承諾</b>
+            <span>${escapeHtml(curUnit.coverageNotice || '本章節彙整課本重點、名校實驗操作及易錯陷阱，讀完保證各校段考真題輕鬆拿滿分！')}</span>
+          </div>
+        </div>
+      </header>
+
+      <!-- 章節快速導航 TOC -->
+      ${sections.length > 0 ? `
+        <div class="review-toc">
+          <div class="review-toc-title">📑 核心知識點快速跳轉</div>
+          <div class="review-toc-list">
+            ${tocHtml}
+          </div>
+        </div>
+      ` : ''}
+
+      <!-- 章節卡片清單 -->
+      <main class="review-sections-list">
+        ${sectionsHtml}
+      </main>
+
+      <!-- 底部行動列 -->
+      <footer class="review-bottom-actions">
+        <button type="button" class="btn btn-ghost" id="btn-review-bottom-back">
+          ← 返回學習地圖
+        </button>
+        <div style="display: flex; gap: 10px;">
+          <button type="button" class="btn btn-secondary" onclick="window.scrollTo({top: 0, behavior: 'smooth'})">
+            ⬆️ 回到頂端
+          </button>
+          <button type="button" class="btn btn-primary btn-lg" id="btn-review-bottom-start-quiz">
+            🎯 複習完畢！立即前往測驗 (${qCount} 題)
+          </button>
+        </div>
+      </footer>
+    </div>
+  `;
+}
+
+function bindReviewEvents() {
+  const curUnitId = state.currentReviewUnitId || 'U1';
+  const curUnit = (window.UNIT_REVIEWS || {})[curUnitId] || {};
+
+  // 單元 Tabs 切換
+  document.querySelectorAll('[data-switch-review-tab]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const uId = btn.getAttribute('data-switch-review-tab');
+      state.currentReviewUnitId = uId;
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      render();
+    });
+  });
+
+  // 立即開始此單元測驗
+  const handleStartQuiz = () => {
+    const qs = getFilteredQuestions(curUnitId, 'ALL');
+    if (qs.length === 0) {
+      showToast('此單元題庫準備中');
+      return;
+    }
+    startQuizSession(`${curUnit.unitTitle || '重點特訓'} 實戰測驗`, '複習後立即檢驗學習成效', qs, 'unit', curUnitId);
+  };
+  document.getElementById('btn-review-start-quiz')?.addEventListener('click', handleStartQuiz);
+  document.getElementById('btn-review-bottom-start-quiz')?.addEventListener('click', handleStartQuiz);
+
+  // A4 列印
+  document.getElementById('btn-review-print')?.addEventListener('click', () => {
+    window.print();
+  });
+
+  // 返回學習地圖
+  document.getElementById('btn-review-back-dash')?.addEventListener('click', () => setView('dashboard'));
+  document.getElementById('btn-review-bottom-back')?.addEventListener('click', () => setView('dashboard'));
+}
+
+// ============================================================================
+// 9. 輔助函式與鍵盤快速鍵 (Helpers & Hotkeys)
+// ============================================================================
+function escapeHtml(str) {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function openLightbox(src, caption) {
+  const modal = document.getElementById('lightbox');
+  const img = document.getElementById('lightbox-img');
+  const cap = document.getElementById('lightbox-caption');
+  if (!modal || !img) return;
+  img.src = src;
+  if (cap) cap.textContent = caption;
+  modal.classList.add('show');
+}
+function closeLightbox() {
+  const modal = document.getElementById('lightbox');
+  if (modal) modal.classList.remove('show');
+}
+
+// 全域快捷鍵綁定
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    closeLightbox();
+    closeUserDropdown();
+    state.drawerOpen = false;
+    const d = document.getElementById('quiz-grid-drawer');
+    if (d) d.style.display = 'none';
+  }
+
+  if (state.view !== 'quiz') return;
+  const qs = state.quizQuestions;
+  if (!qs || qs.length === 0) return;
+  const q = qs[state.quizIndex];
+  const isAnswered = !!state.answers[q.id];
+
+  // 是非題快捷鍵: O/1, X/2
+  if (q.type === 'binary' && !isAnswered) {
+    if (e.key === 'o' || e.key === 'O' || e.key === '1') {
+      submitAnswer('○');
+    } else if (e.key === 'x' || e.key === 'X' || e.key === '2') {
+      submitAnswer('╳');
+    }
+  }
+
+  // 選擇題快捷鍵: 1, 2, 3, 4
+  if (q.type === 'mcq' && !isAnswered) {
+    if (['1', '2', '3', '4'].includes(e.key)) {
+      const idx = parseInt(e.key, 10) - 1;
+      const opt = q.options[idx];
+      if (opt) submitAnswer(opt.text, opt.isCorrect);
+    }
+  }
+
+  // 左右換題快捷鍵
+  if (e.key === 'ArrowRight' || e.key === ' ') {
+    if (state.quizIndex < qs.length - 1) {
+      state.quizIndex++;
+      state.questionStartTime = Date.now();
+      render();
+    }
+  } else if (e.key === 'ArrowLeft') {
+    if (state.quizIndex > 0) {
+      state.quizIndex--;
+      state.questionStartTime = Date.now();
+      render();
+    }
+  }
+});
+
+// 啟動入口
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('lightbox-close')?.addEventListener('click', closeLightbox);
+  document.getElementById('lightbox-backdrop')?.addEventListener('click', closeLightbox);
+  document.getElementById('nav-home')?.addEventListener('click', () => setView('dashboard'));
+  document.getElementById('nav-review')?.addEventListener('click', () => setView('review'));
+  document.getElementById('nav-errors')?.addEventListener('click', () => setView('error_book'));
+  document.getElementById('nav-print')?.addEventListener('click', () => setView('print'));
+  document.getElementById('nav-export')?.addEventListener('click', () => setView('export'));
+
+  // 使用者切換下拉選單
+  document.getElementById('nav-user')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleUserDropdown();
+  });
+
+  // 點擊外部自動收起下拉選單
+  document.addEventListener('click', (e) => {
+    const wrap = document.querySelector('.user-dropdown-wrap');
+    if (wrap && !wrap.contains(e.target)) {
+      closeUserDropdown();
+    }
+  });
+
+  updateNavUserUI();
+  updateNavBadge();
+  render();
+
+  // 若已配置 Firebase 雲端資料庫網址，於啟動時自動拉取雲端進度進行雙向合併
+  if (state.cloudDbUrl) {
+    syncFromCloud(state.currentUser, false);
+  }
+});

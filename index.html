@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>六上自然特訓｜天氣的變化・水溶液・即時對答案・錯題本・A4 出卷</title>
+  <meta name="description" content="國小六年級上學期自然科學（康軒版）特訓系統：涵蓋天氣的變化、水溶液性質、實驗圖表辨析、9校段考真題、雙色迷思詳解、錯題本與 A4 考卷列印。">
+  <meta name="theme-color" content="#059669">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="六上自然">
+
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&family=Outfit:wght@500;700;800&display=swap">
+  <link rel="stylesheet" href="style.css?v=20261024_7">
+
+  <script defer src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
+  <script defer src="data.js?v=20261024_7"></script>
+  <script defer src="app.js?v=20261024_7"></script>
+</head>
+<body>
+  <div class="bg-blobs" aria-hidden="true"><span></span><span></span><span></span></div>
+
+  <header class="topbar no-print">
+    <button class="brand" id="nav-home" type="button" aria-label="回首頁">
+      <span class="brand-mark">自</span>
+      <span class="brand-text">
+        <h1>六上自然特訓</h1>
+        <small>康軒課本 × 9校段考真題</small>
+      </span>
+    </button>
+    <nav class="nav" aria-label="主選單">
+      <div class="user-dropdown-wrap">
+        <button class="nav-btn user-switch-btn" id="nav-user" type="button" aria-haspopup="true" aria-expanded="false" title="切換學員 / 帳號管理">
+          <span id="nav-user-icon">🦖</span>
+          <span id="nav-user-name">Rex</span>
+          <span class="user-caret">▾</span>
+        </button>
+        <div class="user-dropdown-menu" id="user-dropdown-menu" style="display:none;" role="menu"></div>
+      </div>
+      <button class="nav-btn" id="nav-review" type="button">📖 <span class="nav-label">重點複習</span></button>
+      <button class="nav-btn" id="nav-errors" type="button">🔥 <span class="nav-label">錯題本</span> <b class="pill zero" id="nav-error-count">0</b></button>
+      <button class="nav-btn" id="nav-print" type="button">🖨️ <span class="nav-label">A4 出卷</span></button>
+      <button class="nav-btn primary" id="nav-export" type="button">📤 <span class="nav-label">匯出給 AI</span></button>
+    </nav>
+  </header>
+
+  <main id="app" class="app">
+    <p class="loading">自然科特訓系統載入中…</p>
+  </main>
+
+  <!-- 實驗圖表點擊放大燈箱 -->
+  <div id="lightbox" class="lightbox-modal" role="dialog" aria-hidden="true">
+    <div class="lightbox-overlay" id="lightbox-backdrop"></div>
+    <div class="lightbox-content">
+      <button class="lightbox-close" id="lightbox-close" type="button" aria-label="關閉放大圖">✕</button>
+      <img id="lightbox-img" src="" alt="放大圖表">
+      <p id="lightbox-caption" class="lightbox-caption"></p>
+    </div>
+  </div>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <noscript><p class="loading">此網站需要開啟 JavaScript 以進行互動測驗。</p></noscript>
+</body>
+</html>
