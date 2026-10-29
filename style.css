@@ -1486,5 +1486,230 @@ h1, h2, h3, h4 { margin: 0; line-height: 1.3; }
   color: #334155;
 }
 
+/* =========================================================
+   雙科切換標籤與社會科主題系統 (Science vs Social Studies)
+   ========================================================= */
+body[data-subject="social"] {
+  --bg: #fdfaf5;
+  --ink: #271a0c;
+  --ink-2: #4a3520;
+  --ink-3: #846a4e;
+  --line: #e9dcc9;
+  --primary: #d97706;       /* 人文琥珀金 */
+  --primary-2: #4f46e5;     /* 歷史靛藍 */
+  --primary-soft: #fffbeb;
+  --shadow: 0 10px 28px -10px rgba(217, 119, 6, 0.22), 0 2px 6px rgba(39, 26, 12, 0.04);
+  --shadow-lg: 0 20px 45px -15px rgba(217, 119, 6, 0.3);
+}
+body[data-subject="social"] .topbar {
+  background: rgba(253, 250, 245, 0.9);
+  border-bottom-color: rgba(217, 119, 6, 0.16);
+}
+body[data-subject="social"] .brand-mark {
+  background: linear-gradient(135deg, #d97706, #b45309);
+  box-shadow: 0 8px 18px -6px rgba(217, 119, 6, 0.55);
+}
+
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.subject-switcher {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px;
+  background: rgba(15, 36, 29, 0.06);
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  gap: 4px;
+}
+.subject-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 16px;
+  border-radius: 999px;
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--ink-2);
+  transition: all .18s ease;
+}
+.subject-tab:hover {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.55);
+}
+.subject-tab.active[data-switch-subject="science"] {
+  background: linear-gradient(135deg, #059669, #0284c7);
+  color: #ffffff;
+  box-shadow: 0 4px 12px rgba(5, 150, 105, 0.35);
+}
+.subject-tab.active[data-switch-subject="social"] {
+  background: linear-gradient(135deg, #d97706, #b45309);
+  color: #ffffff;
+  box-shadow: 0 4px 12px rgba(217, 119, 6, 0.38);
+}
+
+/* 儀表板頂部雙科快速切換橫幅 */
+.dashboard-subject-bar {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+.dash-subj-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-radius: 14px;
+  font-size: 15px;
+  font-weight: 800;
+  background: #ffffff;
+  border: 2px solid var(--line);
+  color: var(--ink-2);
+  transition: all .18s ease;
+}
+.dash-subj-pill:hover {
+  transform: translateY(-1px);
+  box-shadow: var(--shadow);
+}
+.dash-subj-pill.active-science {
+  background: #ecfdf5;
+  border-color: #059669;
+  color: #065f46;
+}
+.dash-subj-pill.active-social {
+  background: #fffbeb;
+  border-color: #d97706;
+  color: #92400e;
+}
+
+/* 保留整大題與閱讀短文換行排版 */
+.q-text {
+  white-space: pre-line;
+}
+.passage-content {
+  white-space: pre-line;
+}
+
+/* =========================================================
+   紙筆實戰整大題自評模式 (type === 'self_eval')
+   ========================================================= */
+.self-eval-box {
+  margin-top: 18px;
+  padding: 20px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
+  border: 2px dashed #f59e0b;
+}
+.self-eval-prompt {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.self-eval-hint {
+  font-size: 15px;
+  font-weight: 700;
+  color: #92400e;
+  line-height: 1.5;
+}
+.btn-reveal-answer {
+  padding: 12px 24px;
+  border-radius: 12px;
+  font-size: 15.5px;
+  font-weight: 900;
+  color: #ffffff;
+  background: linear-gradient(135deg, #d97706, #b45309);
+  box-shadow: 0 6px 18px -4px rgba(217, 119, 6, 0.45);
+  transition: all .18s ease;
+}
+.btn-reveal-answer:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 22px -4px rgba(217, 119, 6, 0.55);
+}
+
+.self-eval-answer-card {
+  margin-top: 14px;
+  padding: 18px 20px;
+  border-radius: 14px;
+  background: #ffffff;
+  border: 2px solid #f59e0b;
+  box-shadow: 0 6px 18px rgba(217, 119, 6, 0.1);
+}
+.self-eval-ans-title {
+  font-size: 14px;
+  font-weight: 800;
+  color: #b45309;
+  margin-bottom: 6px;
+}
+.self-eval-ans-value {
+  font-size: 18px;
+  font-weight: 900;
+  color: #1e293b;
+  line-height: 1.6;
+  white-space: pre-line;
+  padding: 10px 14px;
+  background: #fefce8;
+  border-radius: 10px;
+  border-left: 4px solid #d97706;
+}
+.self-eval-judge-row {
+  margin-top: 16px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+@media (max-width: 560px) {
+  .self-eval-judge-row {
+    grid-template-columns: 1fr;
+  }
+}
+.btn-self-judge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 14px 18px;
+  border-radius: 14px;
+  font-size: 16px;
+  font-weight: 900;
+  border: 2px solid transparent;
+  transition: all .18s ease;
+}
+.btn-self-judge small {
+  font-size: 12.5px;
+  font-weight: 600;
+  opacity: 0.9;
+}
+.btn-self-judge.judge-ok {
+  background: #ecfdf5;
+  border-color: #10b981;
+  color: #065f46;
+}
+.btn-self-judge.judge-ok:hover,
+.btn-self-judge.judge-ok.selected {
+  background: #10b981;
+  color: #ffffff;
+}
+.btn-self-judge.judge-bad {
+  background: #fff1f2;
+  border-color: #e11d48;
+  color: #9f1239;
+}
+.btn-self-judge.judge-bad:hover,
+.btn-self-judge.judge-bad.selected {
+  background: #e11d48;
+  color: #ffffff;
+}
+.exp-core p, .exp-trap p {
+  white-space: pre-line;
+}
+
+
 
 

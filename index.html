@@ -12,23 +12,34 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&family=Outfit:wght@500;700;800&display=swap">
-  <link rel="stylesheet" href="style.css?v=20261024_7">
+  <link rel="stylesheet" href="style.css?v=20261028_1">
 
   <script defer src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
-  <script defer src="data.js?v=20261024_7"></script>
-  <script defer src="app.js?v=20261024_7"></script>
+  <script defer src="data.js?v=20261028_1"></script>
+  <script defer src="data_social.js?v=20261028_1"></script>
+  <script defer src="app.js?v=20261028_1"></script>
 </head>
-<body>
+<body data-subject="science">
   <div class="bg-blobs" aria-hidden="true"><span></span><span></span><span></span></div>
 
   <header class="topbar no-print">
-    <button class="brand" id="nav-home" type="button" aria-label="回首頁">
-      <span class="brand-mark">自</span>
-      <span class="brand-text">
-        <h1>六上自然特訓</h1>
-        <small>康軒課本 × 9校段考真題</small>
-      </span>
-    </button>
+    <div class="topbar-left">
+      <button class="brand" id="nav-home" type="button" aria-label="回首頁">
+        <span class="brand-mark" id="brand-mark">自</span>
+        <span class="brand-text">
+          <h1 id="brand-title">六上自然特訓</h1>
+          <small id="brand-subtitle">康軒課本 × 9校段考真題</small>
+        </span>
+      </button>
+      <div class="subject-switcher" role="tablist" aria-label="切換科目">
+        <button type="button" class="subject-tab active" id="tab-subj-science" data-switch-subject="science">
+          <span>🌿 自然科</span>
+        </button>
+        <button type="button" class="subject-tab" id="tab-subj-social" data-switch-subject="social">
+          <span>🏛️ 社會科</span>
+        </button>
+      </div>
+    </div>
     <nav class="nav" aria-label="主選單">
       <div class="user-dropdown-wrap">
         <button class="nav-btn user-switch-btn" id="nav-user" type="button" aria-haspopup="true" aria-expanded="false" title="切換學員 / 帳號管理">
