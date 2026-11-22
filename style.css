@@ -696,7 +696,16 @@ h1, h2, h3, h4 { margin: 0; line-height: 1.3; }
 /* ---------- 列印 ---------- */
 @page { size: A4 portrait; margin: 12mm; }
 @media print {
-  .no-print, .topbar, .toast, .lightbox-modal, .quiz-bottom-nav, .quiz-grid-drawer, .exam-school-tabs-wrap { display: none !important; }
+  .no-print, .topbar, .toast, .lightbox-modal, .quiz-bottom-nav, .quiz-grid-drawer, .exam-school-tabs-wrap,
+  .tts-dock, .tts-sec-actions, .tts-hero-btn, .tts-block-play-btn, .cloak-toolbar { display: none !important; }
+  .cloak-mode strong {
+    background: transparent !important;
+    color: inherit !important;
+    border-color: transparent !important;
+    padding: 0 !important;
+    -webkit-text-fill-color: currentColor !important;
+  }
+  .cloak-mode strong::after { display: none !important; }
   body { background: #fff !important; color: #000 !important; font-size: 11pt; }
   .app { max-width: 100%; padding: 0; margin: 0; }
   .print-page { box-shadow: none; padding: 0; border: none; }
@@ -2174,6 +2183,352 @@ body[data-subject="social"] .brand-mark {
 @media (max-width: 640px) {
   .group-subq-card { padding: 12px; }
   .print-opt-grid { grid-template-columns: 1fr; }
+}
+
+/* =========================================================
+   重點語音播放引擎 (.tts-*) & 🙈 遮罩背誦模式 (.cloak-mode)
+   ========================================================= */
+.review-view.has-tts-dock {
+  padding-bottom: 148px;
+}
+.review-sec-header-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tts-sec-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.tts-sec-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 800;
+  background: var(--primary-soft);
+  color: var(--primary);
+  border: 1px solid rgba(5, 150, 105, 0.25);
+  transition: all .15s ease;
+}
+body[data-subject="social"] .tts-sec-btn {
+  border-color: rgba(217, 119, 6, 0.3);
+}
+.tts-sec-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 3px 10px rgba(0,0,0,0.08);
+}
+.tts-sec-btn-podcast {
+  background: #eef2ff;
+  color: #4338ca;
+  border-color: #c7d2fe;
+}
+.tts-sec-btn.is-playing {
+  background: var(--primary);
+  color: #ffffff;
+  border-color: var(--primary);
+  box-shadow: 0 4px 12px rgba(5, 150, 105, 0.3);
+}
+.tts-sec-btn-podcast.is-playing {
+  background: #4f46e5;
+  color: #ffffff;
+  border-color: #4f46e5;
+  box-shadow: 0 4px 12px rgba(79, 70, 229, 0.3);
+}
+.tts-hero-podcast {
+  background: #eef2ff !important;
+  color: #4338ca !important;
+  border-color: #c7d2fe !important;
+}
+#btn-cloak-toggle.active {
+  background: #fef3c7;
+  color: #92400e;
+  border-color: #fcd34d;
+}
+
+/* 段落獨立點讀微喇叭 */
+.tts-block-host {
+  position: relative;
+}
+.tts-block-play-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin-right: 6px;
+  border-radius: 999px;
+  font-size: 12px;
+  vertical-align: middle;
+  background: rgba(15, 23, 42, 0.05);
+  color: var(--ink-2);
+  opacity: 0.45;
+  transition: opacity .15s ease, transform .15s ease, background .15s ease;
+  user-select: none;
+}
+.tts-block-host:hover .tts-block-play-btn,
+tr:hover .tts-block-play-btn,
+.tts-active-block .tts-block-play-btn,
+.tts-block-play-btn:focus-visible {
+  opacity: 1;
+}
+.tts-block-play-btn:hover {
+  background: var(--primary);
+  color: #fff;
+  transform: scale(1.08);
+}
+@media (hover: none) {
+  .tts-block-play-btn { opacity: 0.72; }
+}
+
+/* 逐段跟讀暖黃底追光高亮 */
+.tts-active-block {
+  background: linear-gradient(90deg, rgba(254, 240, 138, 0.55) 0%, rgba(254, 249, 195, 0.35) 100%) !important;
+  box-shadow: inset 4px 0 0 var(--primary), 0 2px 10px rgba(245, 158, 11, 0.16);
+  border-radius: 8px;
+  transition: background .2s ease, box-shadow .2s ease;
+}
+tr.tts-active-block td {
+  background: rgba(254, 240, 138, 0.45) !important;
+}
+tr.tts-active-block td:first-child {
+  box-shadow: inset 4px 0 0 var(--primary);
+}
+
+/* 🙈 遮罩背誦模式 */
+.cloak-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: #fffbeb;
+  border: 1.5px solid #fcd34d;
+  border-radius: var(--radius-sm);
+  padding: 10px 16px;
+  margin-bottom: 18px;
+  font-size: 13.5px;
+  color: #78350f;
+}
+.cloak-toolbar-btns {
+  display: flex;
+  gap: 8px;
+}
+.cloak-mode strong {
+  background: #cbd5e1 !important;
+  color: transparent !important;
+  -webkit-text-fill-color: transparent;
+  border: 1.5px dashed #94a3b8;
+  border-radius: 6px;
+  padding: 1px 8px;
+  cursor: pointer;
+  user-select: none;
+  transition: all .18s ease;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.cloak-mode strong:hover {
+  background: #94a3b8 !important;
+}
+.cloak-mode strong.revealed {
+  background: #dcfce7 !important;
+  color: #14532d !important;
+  -webkit-text-fill-color: #14532d;
+  border: 1px solid #86efac;
+  user-select: text;
+}
+
+/* 底部浮動膠囊播放器 (.tts-dock) */
+.tts-dock {
+  position: fixed;
+  left: 50%;
+  bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+  transform: translateX(-50%);
+  width: min(760px, calc(100vw - 24px));
+  z-index: 900;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.96);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1.5px solid var(--line);
+  box-shadow: 0 18px 42px -12px rgba(15, 23, 42, 0.28), 0 0 0 1px rgba(5, 150, 105, 0.12);
+}
+.tts-dock-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.tts-dock-info {
+  min-width: 0;
+  flex: 1;
+}
+.tts-dock-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.tts-dock-sec-badge {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 800;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+.tts-dock-title {
+  font-size: 14px;
+  font-weight: 800;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tts-dock-subtitle {
+  margin-top: 3px;
+  font-size: 12.5px;
+  color: var(--ink-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tts-quiz-bar-wrap {
+  margin-top: 5px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tts-quiz-bar-wrap > .tts-quiz-bar-fill {
+  flex: 1;
+  height: 7px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #f59e0b, #ef4444);
+  transition: width 0.1s linear;
+}
+.tts-quiz-countdown {
+  font-size: 11.5px;
+  font-weight: 900;
+  color: #b45309;
+  font-family: var(--font-num);
+  flex-shrink: 0;
+}
+.tts-dock-mode-pills {
+  display: inline-flex;
+  background: #f1f5f9;
+  border-radius: 999px;
+  padding: 3px;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.tts-mode-pill {
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  color: #475569;
+  transition: all .15s ease;
+}
+.tts-mode-pill.active {
+  background: var(--primary);
+  color: #fff;
+}
+.tts-dock-progress-track {
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  cursor: pointer;
+  overflow: hidden;
+}
+.tts-dock-progress-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, var(--primary), var(--primary-2));
+  transition: width .12s linear;
+}
+.tts-dock-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tts-dock-transport {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.tts-ctrl-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  font-size: 15px;
+  background: #f1f5f9;
+  color: var(--ink);
+  transition: transform .12s ease, background .12s ease;
+}
+.tts-ctrl-btn:hover { background: #e2e8f0; }
+.tts-ctrl-play {
+  width: 42px;
+  height: 38px;
+  background: linear-gradient(135deg, var(--primary), var(--primary-2));
+  color: #fff;
+  font-weight: 900;
+  box-shadow: 0 4px 12px rgba(5, 150, 105, 0.28);
+}
+.tts-dock-toggles {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.tts-chip-btn {
+  padding: 5px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  color: var(--ink-2);
+}
+.tts-chip-btn.active {
+  background: var(--primary-soft);
+  color: var(--primary);
+  border-color: var(--primary);
+}
+.tts-close-btn {
+  padding: 5px 9px;
+  color: #64748b;
+}
+
+@media (max-width: 640px) {
+  .tts-dock {
+    width: calc(100vw - 14px);
+    padding: 10px 12px;
+    bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+    border-radius: 16px;
+  }
+  .tts-dock-top {
+    flex-direction: column;
+    gap: 6px;
+  }
+  .tts-chip-btn {
+    padding: 4px 8px;
+    font-size: 11.5px;
+  }
 }
 
 

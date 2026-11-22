@@ -158,6 +158,7 @@ function updateSubjectThemeUI() {
 function switchSubject(subj) {
   if (subj !== 'science' && subj !== 'social') return;
   if (state.subject === subj && state.view === 'dashboard') return;
+  window.ReviewTTS?.stop();
   state.subject = subj;
   localStorage.setItem(ACTIVE_SUBJECT_KEY, subj);
   state.examSchool = 'ALL';
@@ -610,6 +611,9 @@ function showToast(msg) {
 // 2. 視圖切換與導覽 (Router)
 // ============================================================================
 function setView(view) {
+  if (view !== 'review') {
+    window.ReviewTTS?.stop();
+  }
   state.view = view;
   state.drawerOpen = false;
   window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -2594,6 +2598,16 @@ function formatReviewMarkdown(md) {
   let tableRows = [];
   let inList = false;
   let listType = 'ul';
+  let ttsBlockIdx = 0;
+
+  function isTtsTrap(text, extra = false) {
+    return extra || /⚠️|❌|陷阱|防雷|魔鬼|迷思|易錯|禁用|嚴禁|絕對不是|切勿|偷換字|地雷/.test(text || '');
+  }
+
+  function ttsAttrs(text, extraTrap = false) {
+    const trap = isTtsTrap(text, extraTrap);
+    return ` data-tts-block="${ttsBlockIdx++}"${trap ? ' data-tts-trap="1"' : ''}`;
+  }
 
   function closeList() {
     if (inList) {
@@ -2604,13 +2618,14 @@ function formatReviewMarkdown(md) {
 
   function closeTable() {
     if (inTable) {
+      const headersAttr = escapeHtml(JSON.stringify(tableHeaders));
       let tHtml = '<div class="review-table-wrap"><table class="review-table"><thead><tr>';
       tableHeaders.forEach(h => {
         tHtml += `<th>${inlineFormat(h)}</th>`;
       });
       tHtml += '</tr></thead><tbody>';
       tableRows.forEach(row => {
-        tHtml += '<tr>';
+        tHtml += `<tr${ttsAttrs(row.join(' '))} data-tts-headers="${headersAttr}">`;
         row.forEach(cell => {
           tHtml += `<td>${inlineFormat(cell)}</td>`;
         });
@@ -2673,31 +2688,33 @@ function formatReviewMarkdown(md) {
       closeList();
       const hText = line.slice(4);
       let hClass = 'review-h4';
+      const isTrapH = hText.includes('⚠️') || hText.includes('🔥');
       if (hText.includes('🔬') || hText.includes('🧪')) hClass += ' review-h4-exp';
-      if (hText.includes('⚠️') || hText.includes('🔥')) hClass += ' review-h4-trap';
-      html.push(`<h4 class="${hClass}">${inlineFormat(hText)}</h4>`);
+      if (isTrapH) hClass += ' review-h4-trap';
+      html.push(`<h4 class="${hClass}"${ttsAttrs(hText, isTrapH)}>${inlineFormat(hText)}</h4>`);
       continue;
     }
     if (line.startsWith('## ')) {
       closeList();
-      html.push(`<h3 class="review-h3">${inlineFormat(line.slice(3))}</h3>`);
+      const hText = line.slice(3);
+      html.push(`<h3 class="review-h3"${ttsAttrs(hText)}>${inlineFormat(hText)}</h3>`);
       continue;
     }
 
     // 醒目提示框 / 易錯陷阱 / 實驗
     if (line.startsWith('⚠️') || line.startsWith('🔥 【易錯') || line.startsWith('🔥 【段考') || line.includes('【易錯陷阱】')) {
       closeList();
-      html.push(`<div class="review-callout callout-trap"><div class="callout-icon">⚠️</div><div class="callout-content">${inlineFormat(line)}</div></div>`);
+      html.push(`<div class="review-callout callout-trap"${ttsAttrs(line, true)}><div class="callout-icon">⚠️</div><div class="callout-content">${inlineFormat(line)}</div></div>`);
       continue;
     }
     if (line.startsWith('🔬 【實驗') || line.startsWith('🧪 【實驗') || line.includes('【實驗操作】') || line.includes('【實驗拆解】')) {
       closeList();
-      html.push(`<div class="review-callout callout-exp"><div class="callout-icon">🔬</div><div class="callout-content">${inlineFormat(line)}</div></div>`);
+      html.push(`<div class="review-callout callout-exp"${ttsAttrs(line)}><div class="callout-icon">🔬</div><div class="callout-content">${inlineFormat(line)}</div></div>`);
       continue;
     }
     if (line.startsWith('💡 【名校') || line.startsWith('💡 【解題') || line.includes('【考點提示】')) {
       closeList();
-      html.push(`<div class="review-callout callout-tip"><div class="callout-icon">💡</div><div class="callout-content">${inlineFormat(line)}</div></div>`);
+      html.push(`<div class="review-callout callout-tip"${ttsAttrs(line)}><div class="callout-icon">💡</div><div class="callout-content">${inlineFormat(line)}</div></div>`);
       continue;
     }
 
@@ -2710,11 +2727,12 @@ function formatReviewMarkdown(md) {
         html.push('<ul class="review-ul">');
       }
       const itemContent = line.slice(2);
+      const isTrapLi = itemContent.includes('⚠️') || itemContent.includes('【易錯');
       let liClass = '';
-      if (itemContent.includes('⚠️') || itemContent.includes('【易錯')) liClass = ' class="review-li-trap"';
+      if (isTrapLi) liClass = ' class="review-li-trap"';
       else if (itemContent.includes('🔬') || itemContent.includes('【實驗')) liClass = ' class="review-li-exp"';
       else if (itemContent.includes('💡') || itemContent.includes('【名校')) liClass = ' class="review-li-tip"';
-      html.push(`<li${liClass}>${inlineFormat(itemContent)}</li>`);
+      html.push(`<li${liClass}${ttsAttrs(itemContent, isTrapLi)}>${inlineFormat(itemContent)}</li>`);
       continue;
     }
 
@@ -2728,17 +2746,18 @@ function formatReviewMarkdown(md) {
         html.push('<ol class="review-ol">');
       }
       const itemContent = numMatch[2];
+      const isTrapLi = itemContent.includes('⚠️') || itemContent.includes('【易錯');
       let liClass = '';
-      if (itemContent.includes('⚠️') || itemContent.includes('【易錯')) liClass = ' class="review-li-trap"';
+      if (isTrapLi) liClass = ' class="review-li-trap"';
       else if (itemContent.includes('🔬') || itemContent.includes('【實驗')) liClass = ' class="review-li-exp"';
       else if (itemContent.includes('💡') || itemContent.includes('【名校')) liClass = ' class="review-li-tip"';
-      html.push(`<li${liClass}>${inlineFormat(itemContent)}</li>`);
+      html.push(`<li${liClass}${ttsAttrs(itemContent, isTrapLi)}>${inlineFormat(itemContent)}</li>`);
       continue;
     }
 
     // 一般段落
     closeList();
-    html.push(`<p class="review-p">${inlineFormat(line)}</p>`);
+    html.push(`<p class="review-p"${ttsAttrs(line)}>${inlineFormat(line)}</p>`);
   }
 
   closeList();
@@ -2792,6 +2811,8 @@ function renderReviewView() {
 
   // 章節 Quick Jump TOC
   const sections = curUnit.sections || [];
+  const subjCode = isSocial() ? 'soc' : 'sci';
+  const hasUnitPodcast = !!(window.ReviewTTS?.hasUnitPodcast(subjCode, curUnitId, sections.length));
   const tocHtml = sections.map((sec, idx) => `
     <a href="#review-sec-${idx}" class="review-toc-item">
       ${escapeHtml(sec.title.split(' ')[0] || `小節 ${idx+1}`)}
@@ -2799,17 +2820,32 @@ function renderReviewView() {
   `).join('');
 
   // 章節卡片
-  const sectionsHtml = sections.map((sec, idx) => `
+  const sectionsHtml = sections.map((sec, idx) => {
+    const secHasPodcast = !!(window.ReviewTTS?.hasPodcast(subjCode, curUnitId, idx));
+    return `
     <article class="review-section-card" id="review-sec-${idx}">
       <div class="review-section-header">
         <h3>${escapeHtml(sec.title)}</h3>
-        <span class="review-sec-badge">重點主題 ${idx + 1}</span>
+        <div class="review-sec-header-right">
+          <div class="tts-sec-actions no-print">
+            <button type="button" class="tts-sec-btn" data-tts-play-sec="${idx}" data-tts-play-mode="follow" title="逐段語音跟讀">
+              ${secHasPodcast ? '📖 跟讀' : '🔊 跟讀'}
+            </button>
+            ${secHasPodcast ? `
+              <button type="button" class="tts-sec-btn tts-sec-btn-podcast" data-tts-play-sec="${idx}" data-tts-play-mode="podcast" title="雙師重點講解＋3秒快問快答">
+                🎙️ 老師講
+              </button>
+            ` : ''}
+          </div>
+          <span class="review-sec-badge">重點主題 ${idx + 1}</span>
+        </div>
       </div>
       <div class="review-body">
         ${formatReviewMarkdown(sec.content)}
       </div>
     </article>
-  `).join('');
+  `;
+  }).join('');
 
   // 測驗題數統計
   const qsForThisUnit = getFilteredQuestions(curUnitId, 'ALL');
@@ -2832,6 +2868,17 @@ function renderReviewView() {
           <div class="review-hero-actions">
             <button type="button" class="btn btn-primary" id="btn-review-start-quiz">
               🎯 立即測驗此單元 (${qCount} 題)
+            </button>
+            <button type="button" class="btn btn-secondary tts-hero-btn no-print" id="btn-tts-unit-follow">
+              ${hasUnitPodcast ? '📖 跟讀本單元' : '🔊 語音跟讀'}
+            </button>
+            ${hasUnitPodcast ? `
+              <button type="button" class="btn btn-secondary tts-hero-btn tts-hero-podcast no-print" id="btn-tts-unit-podcast">
+                🎙️ 老師講重點
+              </button>
+            ` : ''}
+            <button type="button" class="btn btn-ghost tts-hero-btn no-print" id="btn-cloak-toggle">
+              🙈 遮罩背誦
             </button>
             <button type="button" class="btn btn-ghost" id="btn-review-print">
               🖨️ A4 重點手冊
@@ -2860,6 +2907,15 @@ function renderReviewView() {
           </div>
         </div>
       ` : ''}
+
+      <!-- 🙈 遮罩背誦輔助工具列 -->
+      <div class="cloak-toolbar no-print" id="cloak-toolbar" style="display:none;">
+        <span class="cloak-toolbar-hint">🙈 <b>背誦遮罩已開啟</b>：邊聽邊想關鍵字，點擊任意色塊即可偷看解答！</span>
+        <div class="cloak-toolbar-btns">
+          <button type="button" class="btn btn-ghost" id="btn-cloak-reveal-all">👁️ 全部暫看</button>
+          <button type="button" class="btn btn-ghost" id="btn-cloak-reset-all">🙈 重新全遮</button>
+        </div>
+      </div>
 
       <!-- 章節卡片清單 -->
       <main class="review-sections-list">
@@ -2919,6 +2975,16 @@ function bindReviewEvents() {
   // 返回學習地圖
   document.getElementById('btn-review-back-dash')?.addEventListener('click', () => setView('dashboard'));
   document.getElementById('btn-review-bottom-back')?.addEventListener('click', () => setView('dashboard'));
+
+  // 語音播放與遮罩背誦接線
+  const sections = curUnit.sections || [];
+  window.ReviewTTS?.bindReviewPage({
+    subject: isSocial() ? 'soc' : 'sci',
+    unitId: curUnitId,
+    unitTitle: curTitle,
+    sectionCount: sections.length,
+    sectionTitles: sections.map(s => s.title)
+  });
 }
 
 // ============================================================================
