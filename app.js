@@ -32,11 +32,15 @@ const state = {
   quizMode: 'unit', // 'unit' | 'school' | 'error_book' | 'all'
   currentUnitId: 'EXAM_MID1',
   examSchool: 'ALL',
+  examSchoolByUnit: { EXAM_MID1: 'ALL', EXAM_MID2: 'ALL' },
   quizQuestions: [],
   quizIndex: 0,
-  answers: {}, // qId -> { result: 'ok'|'bad', selected: string, revealed: boolean, timeSeconds: number }
+  answers: {}, // qId -> { result: 'ok'|'bad', selected: string|Array, revealed: boolean, timeSeconds: number }
   multiSelections: {},
   selfEvalRevealed: {}, // qId -> boolean (紙筆大題是否已展開看標準答案)
+  subAnswers: {}, // qId -> { [subId]: { result: 'ok'|'bad', selected, revealed: true } }
+  subMultiSelections: {}, // qId -> { [subId]: Set }
+  subSelfEvalRevealed: {}, // qId -> { [subId]: boolean }
   sessionStartTime: 0,
   questionStartTime: 0,
   
@@ -48,8 +52,10 @@ const state = {
   
   // Print config
   printConfig: {
+    unitId: null,
     school: 'ALL',
-    count: 20
+    count: 25,
+    includeAnswers: false
   }
 };
 
@@ -78,10 +84,47 @@ function getActiveLessons() {
     ? (window.SOCIAL_LESSONS || [])
     : (window.LESSONS || []);
 }
-function getActiveSchools() {
+function isExamUnitId(unitId) {
+  if (!unitId) return false;
+  if (unitId === 'EXAM_MID1' || unitId === 'EXAM_MID2') return true;
+  return getActiveLessons().some(u => u.id === unitId && !!u.isExam);
+}
+function getExamSchool(unitId = state.currentUnitId) {
+  if (state.examSchoolByUnit && state.examSchoolByUnit[unitId]) {
+    return state.examSchoolByUnit[unitId];
+  }
+  return state.examSchool || 'ALL';
+}
+function setExamSchool(unitId, schoolKey) {
+  if (!state.examSchoolByUnit) state.examSchoolByUnit = {};
+  state.examSchoolByUnit[unitId] = schoolKey || 'ALL';
+  state.examSchool = schoolKey || 'ALL';
+}
+function getActiveSchools(unitId = state.currentUnitId) {
+  if (unitId === 'EXAM_MID2') {
+    return isSocial()
+      ? (window.SOCIAL_EXAM_MID2_SCHOOLS || [])
+      : (window.EXAM_MID2_SCHOOLS || []);
+  }
   return isSocial()
     ? (window.SOCIAL_EXAM_SCHOOLS || [])
     : (window.EXAM_SCHOOLS || []);
+}
+function getMergedErrorSchools() {
+  const s1 = getActiveSchools('EXAM_MID1');
+  const s2 = getActiveSchools('EXAM_MID2');
+  const seen = new Set();
+  const out = [];
+  for (const s of [...s1, ...s2]) {
+    if (!s || seen.has(s.id)) continue;
+    seen.add(s.id);
+    if (s.id === 'ALL') {
+      out.push({ ...s, shortName: '全部範圍' });
+    } else {
+      out.push(s);
+    }
+  }
+  return out;
 }
 function getActiveReviews() {
   return isSocial()
@@ -100,13 +143,13 @@ function updateSubjectThemeUI() {
   if (isSocial()) {
     if (markEl) markEl.textContent = '社';
     if (titleEl) titleEl.textContent = '六上社會特訓';
-    if (subEl) subEl.textContent = '康軒課本 × 7校段考真題';
-    document.title = '六上社會特訓｜民主政治・社會變遷與多元文化・7校段考真題';
+    if (subEl) subEl.textContent = '康軒課本 × 期中期末名校真題';
+    document.title = '六上社會特訓｜康軒全冊重點・4D解析・期中期末名校真題';
   } else {
     if (markEl) markEl.textContent = '自';
     if (titleEl) titleEl.textContent = '六上自然特訓';
-    if (subEl) subEl.textContent = '康軒課本 × 9校段考真題';
-    document.title = '六上自然特訓｜天氣的變化・水溶液・即時對答案・錯題本・A4 出卷';
+    if (subEl) subEl.textContent = '康軒課本 × 期中期末名校真題';
+    document.title = '六上自然特訓｜康軒全冊重點・4D解析・期中期末名校真題';
   }
   tabSci?.classList.toggle('active', !isSocial());
   tabSoc?.classList.toggle('active', isSocial());
@@ -118,13 +161,14 @@ function switchSubject(subj) {
   state.subject = subj;
   localStorage.setItem(ACTIVE_SUBJECT_KEY, subj);
   state.examSchool = 'ALL';
+  state.examSchoolByUnit = { EXAM_MID1: 'ALL', EXAM_MID2: 'ALL' };
   state.errorFilterSchool = 'ALL';
   state.currentReviewUnitId = 'U1';
   state.drawerOpen = false;
   state.view = 'dashboard';
   updateSubjectThemeUI();
   updateNavBadge();
-  showToast(subj === 'social' ? '🏛️ 已切換至【六上社會科（康軒版 × 7校真題）】' : '🌿 已切換至【六上自然科（康軒版 × 9校真題）】');
+  showToast(subj === 'social' ? '🏛️ 已切換至【六上社會科（康軒全冊）】' : '🌿 已切換至【六上自然科（康軒全冊）】');
   syncFromCloud(state.currentUser, false);
   render();
 }
@@ -444,12 +488,14 @@ async function syncFromCloud(uid = state.currentUser, notify = false) {
 async function pushSlimLogToCloud(q, isCorrect, studentAnswer, durationSec) {
   const nowStr = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false });
   let optsStr = '';
-  if (q.type === 'mcq' && Array.isArray(q.options)) {
+  if ((q.type === 'mcq' || q.type === 'match') && Array.isArray(q.options)) {
     optsStr = q.options.map((o, idx) => `[${idx+1}] ${o.text}${o.isCorrect ? '*' : ''}`).join(' | ');
   } else if (q.type === 'binary') {
     optsStr = `正解: ${q.correctAnswer}`;
   } else if (q.type === 'self_eval') {
     optsStr = `紙筆自評大題｜標準答案: ${q.correctAnswer}`;
+  } else if (q.type === 'group') {
+    optsStr = `綜合題組(${(q.subQuestions || []).length}小題)`;
   } else {
     optsStr = `多選複選題`;
   }
@@ -600,21 +646,28 @@ function render() {
 }
 
 // ============================================================================
-// 3. 首頁儀表板 (Dashboard) — 全真段考收納為單一大卡片 EXAM_MID1
+// 3. 首頁儀表板 (Dashboard) — 支援多段考卡片 (EXAM_MID1 / EXAM_MID2) 與雙軌篩選
 // ============================================================================
-function getFilteredQuestions(unitId, schoolKey = state.examSchool) {
+function getFilteredQuestions(unitId, schoolKey = null) {
   const bank = getActiveQuestionBank();
-  if (unitId === 'EXAM_MID1') {
-    if (schoolKey === 'ALL') {
-      return bank.filter(q => q.unitId === 'EXAM_MID1');
+  if (isExamUnitId(unitId)) {
+    const sk = schoolKey || getExamSchool(unitId);
+    if (sk === 'ALL') {
+      return bank.filter(q => q.unitId === unitId);
     }
-    return bank.filter(q => q.unitId === 'EXAM_MID1' && q.schoolKey === schoolKey);
+    return bank.filter(q => q.unitId === unitId && q.schoolKey === sk);
   }
-  return bank.filter(q => q.unitId === unitId || q.lessonId === unitId);
+  return bank.filter(q =>
+    q.unitId === unitId ||
+    q.lessonId === unitId ||
+    q.targetUnitId === unitId ||
+    (Array.isArray(q.secondaryUnitIds) && q.secondaryUnitIds.includes(unitId))
+  );
 }
 
-function getUnitStats(unitId, schoolKey = state.examSchool) {
-  const pool = getFilteredQuestions(unitId, schoolKey);
+function getUnitStats(unitId, schoolKey = null) {
+  const effectiveSchool = isExamUnitId(unitId) ? (schoolKey || getExamSchool(unitId)) : 'ALL';
+  const pool = getFilteredQuestions(unitId, effectiveSchool);
   const eb = getErrorBook();
   const ccMap = getCorrectCounts();
   const ecMap = getErrorCounts();
@@ -639,23 +692,29 @@ function renderDashboardView() {
   const g = getGlobalStats();
   const curUser = getCurrentUserObj();
   const lessons = getActiveLessons();
-  const schools = getActiveSchools();
   const socialMode = isSocial();
-  const schoolCountBadge = socialMode ? '🏆 7校全真考卷' : '🏆 9校全真考卷';
+  const hasMid2 = lessons.some(u => u.id === 'EXAM_MID2') && getFilteredQuestions('EXAM_MID2', 'ALL').length > 0;
+
   const heroTitle = socialMode
     ? `${curUser.icon} ${curUser.name} 的六上社會特訓 🏛️`
     : `${curUser.icon} ${curUser.name} 的六上自然特訓 🔬`;
   const heroDesc = socialMode
-    ? '108課綱 康軒版六上社會（民主政治・多元文化） × 7所名校第一次段考全真題庫'
-    : '108課綱 康軒版核心概念 × 9所名校第一次段考全真題庫';
+    ? '108課綱 康軒版六上全冊（民主政治・多元文化・戰後經濟・城鄉永續） × 4D解析＆16校期中期末真題'
+    : '108課綱 康軒版六上全冊（天氣・水溶液・動物大解密・電磁作用） × 4D解析＆19校期中期末真題';
   const mapDesc = socialMode
-    ? '康軒版六上社會 · 單元一～二核心概念 ＋ 第一次段考（7校全真考卷）'
-    : '康軒版六上自然 · 單元概念 ＋ 第一次段考（9校全真真題）';
+    ? '康軒版六上社會 · 單元一～五全冊重點 ＋ 第一次／第二次段考真題'
+    : '康軒版六上自然 · 單元一～四全冊重點 ＋ 第一次／第二次段考真題';
 
   const unitCardsHtml = lessons.map(u => {
     const isExamUnit = !!u.isExam;
-    const st = getUnitStats(u.id);
+    const examSchools = isExamUnit ? getActiveSchools(u.id) : [];
+    const curExamSchool = isExamUnit ? getExamSchool(u.id) : 'ALL';
+    const realSchoolCount = examSchools.filter(s => s.id !== 'ALL').length;
+    const schoolCountBadge = `🏆 ${realSchoolCount}校全真考卷`;
+    const st = getUnitStats(u.id, curExamSchool);
     const isLocked = st.total === 0;
+    const reviews = getActiveReviews();
+    const hasReview = !!reviews[u.id];
 
     return `
       <article class="unit-card ${isExamUnit ? 'exam-card' : ''} ${isLocked ? 'locked' : ''}">
@@ -672,14 +731,17 @@ function renderDashboardView() {
           <span class="tag">${st.total} 題</span>
         </div>
 
-        ${isExamUnit ? `
+        ${isExamUnit && examSchools.length > 0 ? `
           <div class="exam-card-quick-select">
-            <select class="exam-school-select" id="exam-school-select">
-              ${schools.map(s => `
-                <option value="${s.id}" ${state.examSchool === s.id ? 'selected' : ''}>
-                  ${s.shortName} (${s.count || 0} 題)
-                </option>
-              `).join('')}
+            <select class="exam-school-select" data-exam-school-select="${u.id}">
+              ${examSchools.map(s => {
+                const cnt = typeof s.count === 'number' && s.count > 0 ? s.count : getFilteredQuestions(u.id, s.id).length;
+                return `
+                  <option value="${s.id}" ${curExamSchool === s.id ? 'selected' : ''}>
+                    ${s.shortName} (${cnt} 題)
+                  </option>
+                `;
+              }).join('')}
             </select>
           </div>
         ` : ''}
@@ -688,7 +750,7 @@ function renderDashboardView() {
           <button class="btn btn-primary" style="flex-grow: 1;" data-start-unit="${u.id}" ${isLocked ? 'disabled' : ''}>
             ${isExamUnit ? '🏆 開始段考' : '開始特訓'}
           </button>
-          <button class="btn btn-secondary btn-review" data-review-unit="${u.id}">
+          <button class="btn btn-secondary btn-review" data-review-unit="${u.id}" ${!hasReview && isLocked ? 'disabled' : ''}>
             📖 重點複習
           </button>
           ${st.errCount > 0 ? `
@@ -710,11 +772,11 @@ function renderDashboardView() {
       <div class="dashboard-subject-bar">
         <button type="button" class="dash-subj-pill ${!socialMode ? 'active-science' : ''}" data-dash-subject="science">
           <span style="font-size:20px;">🌿</span>
-          <span>自然科（天氣變化・水溶液・9校真題）</span>
+          <span>自然科（天氣・水溶液・動物・電磁 × 期中期末）</span>
         </button>
         <button type="button" class="dash-subj-pill ${socialMode ? 'active-social' : ''}" data-dash-subject="social">
           <span style="font-size:20px;">🏛️</span>
-          <span>社會科（民主政治・多元文化・7校真題）</span>
+          <span>社會科（民主・多元・戰後經濟・永續 × 期中期末）</span>
         </button>
       </div>
 
@@ -725,7 +787,9 @@ function renderDashboardView() {
             <p>${heroDesc}</p>
           </div>
           <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-            <button class="btn btn-secondary btn-lg" id="btn-quick-review">📖 第一次段考精華重點</button>
+            <button class="btn btn-secondary btn-lg" id="btn-quick-review" data-quick-review-id="${hasMid2 ? 'EXAM_MID2' : 'EXAM_MID1'}">
+              📖 ${hasMid2 ? '期末考精華重點' : '第一次段考精華重點'}
+            </button>
             <button class="btn btn-primary btn-lg" id="btn-quick-start">🚀 隨機特訓 20 題</button>
           </div>
         </div>
@@ -759,15 +823,19 @@ function bindDashboardEvents() {
     });
   });
 
-  // 學校快選切換
-  document.getElementById('exam-school-select')?.addEventListener('change', (e) => {
-    state.examSchool = e.target.value;
-    render();
+  // 學校快選切換 (支援 EXAM_MID1 / EXAM_MID2)
+  document.querySelectorAll('[data-exam-school-select]').forEach(sel => {
+    sel.addEventListener('change', (e) => {
+      const uId = sel.getAttribute('data-exam-school-select');
+      setExamSchool(uId, e.target.value);
+      render();
+    });
   });
 
   // 快捷重點精華複習
-  document.getElementById('btn-quick-review')?.addEventListener('click', () => {
-    state.currentReviewUnitId = 'EXAM_MID1';
+  document.getElementById('btn-quick-review')?.addEventListener('click', (e) => {
+    const targetRev = e.currentTarget.getAttribute('data-quick-review-id') || 'EXAM_MID1';
+    state.currentReviewUnitId = targetRev;
     setView('review');
   });
 
@@ -776,7 +844,7 @@ function bindDashboardEvents() {
     const bank = getActiveQuestionBank();
     if (bank.length === 0) return showToast('題庫加載中');
     const shuffled = [...bank].sort(() => Math.random() - 0.5).slice(0, 20);
-    startQuizSession('隨機綜合特訓', '20題 綜合實戰測試', shuffled, 'all', 'EXAM_MID1');
+    startQuizSession('隨機綜合特訓', '20題 綜合實戰測試', shuffled, 'all', 'ALL');
   });
 
   // 單元重點複習
@@ -792,13 +860,18 @@ function bindDashboardEvents() {
   document.querySelectorAll('[data-start-unit]').forEach(btn => {
     btn.addEventListener('click', () => {
       const uId = btn.getAttribute('data-start-unit');
-      const qs = getFilteredQuestions(uId, state.examSchool);
+      const schoolKey = isExamUnitId(uId) ? getExamSchool(uId) : 'ALL';
+      const qs = getFilteredQuestions(uId, schoolKey);
       if (qs.length === 0) return showToast('此範圍題目整理中');
       
       const uObj = getActiveLessons().find(x => x.id === uId);
-      const sObj = getActiveSchools().find(x => x.id === state.examSchool);
-      const title = uId === 'EXAM_MID1' ? `${sObj ? sObj.shortName : '第一次段考'} 試卷` : uObj.title;
-      const subtitle = uId === 'EXAM_MID1' ? (isSocial() ? '7校真題全真模考' : '9校真題全真模考') : uObj.description;
+      const sObj = isExamUnitId(uId) ? getActiveSchools(uId).find(x => x.id === schoolKey) : null;
+      const title = isExamUnitId(uId)
+        ? `${sObj ? sObj.shortName : (uObj?.title || '段考真題')} 試卷`
+        : (uObj?.title || uId);
+      const subtitle = isExamUnitId(uId)
+        ? `${uObj?.scope || '名校全真段考模考'}`
+        : (uObj?.description || '');
       startQuizSession(title, subtitle, qs, 'unit', uId);
     });
   });
@@ -808,7 +881,8 @@ function bindDashboardEvents() {
     btn.addEventListener('click', () => {
       const uId = btn.getAttribute('data-kill-unit-errors');
       const eb = getErrorBook();
-      const qs = getFilteredQuestions(uId, state.examSchool).filter(q => eb.includes(q.id));
+      const schoolKey = isExamUnitId(uId) ? getExamSchool(uId) : 'ALL';
+      const qs = getFilteredQuestions(uId, schoolKey).filter(q => eb.includes(q.id));
       if (qs.length === 0) return showToast('目前沒有錯題！');
       startQuizSession('錯題消滅特訓', '徹底搞懂剛剛失誤的題目', qs, 'error_book', uId);
     });
@@ -819,6 +893,8 @@ function bindDashboardEvents() {
     btn.addEventListener('click', () => {
       const uId = btn.getAttribute('data-print-unit');
       state.currentUnitId = uId;
+      state.printConfig.unitId = uId;
+      state.printConfig.school = isExamUnitId(uId) ? getExamSchool(uId) : 'ALL';
       setView('print');
     });
   });
@@ -828,200 +904,139 @@ function bindDashboardEvents() {
 // 4. 測驗執行邏輯 (Quiz Engine) — 頂部折疊題號盤 ＋ 學校標籤切換列
 // ============================================================================
 
-// 題目對應重點章節智慧匹配
+// 題目對應重點章節智慧匹配（支援 U1~U5 + reviewRef 直接指定）
 function getReviewTopicForQuestion(q) {
   const reviews = getActiveReviews();
   if (!reviews) return null;
-  
-  const text = ((q.domain || '') + ' ' + (q.question || '') + ' ' + (q.title || '')).toLowerCase();
+
+  // 1. 明確指定 reviewRef { unitId, secIndex } 時優先直連
+  if (q.reviewRef && q.reviewRef.unitId && reviews[q.reviewRef.unitId]?.sections) {
+    const u = reviews[q.reviewRef.unitId];
+    const secIdx = Math.min(q.reviewRef.secIndex || 0, u.sections.length - 1);
+    const sec = u.sections[secIdx];
+    if (sec) {
+      return {
+        unitId: q.reviewRef.unitId,
+        unitTitle: u.unitTitle || u.title || q.reviewRef.unitId,
+        secIndex: secIdx,
+        secTitle: sec.title,
+        content: sec.content
+      };
+    }
+  }
+
+  const text = ((q.domain || '') + ' ' + (q.sectionName || '') + ' ' + (q.question || '') + ' ' + (q.title || '')).toLowerCase();
+  const uHint = q.targetUnitId || q.lessonId || q.unitId;
+
+  // 2. 期末單元智能比對 (U3 / U4 / U5 / EXAM_MID2)
+  if ((uHint === 'U3' || uHint === 'U4' || uHint === 'U5' || uHint === 'EXAM_MID2') && reviews[uHint]?.sections?.length) {
+    const u = reviews[uHint];
+    let secIdx = 0;
+    if (isSocial()) {
+      if (uHint === 'U3') {
+        secIdx = (text.includes('科技島') || text.includes('科學園區') || text.includes('竹科') || text.includes('品牌') || text.includes('代工') || text.includes('mit')) && u.sections.length > 1 ? 1 : 0;
+      } else if (uHint === 'U4') {
+        if (text.includes('永續') || text.includes('創生') || text.includes('成龍村') || text.includes('老化') || text.includes('高齡') || text.includes('返鄉')) secIdx = Math.min(2, u.sections.length - 1);
+        else if (text.includes('都更') || text.includes('社宅') || text.includes('污染') || text.includes('鱟') || text.includes('塞車') || text.includes('工業化')) secIdx = Math.min(1, u.sections.length - 1);
+        else secIdx = 0;
+      }
+    } else {
+      if (uHint === 'U3') {
+        if (text.includes('仿生') || text.includes('經濟動物') || text.includes('格子籠') || text.includes('保育') || text.includes('船槳')) secIdx = Math.min(2, u.sections.length - 1);
+        else if (text.includes('呼吸') || text.includes('肺') || text.includes('氣孔') || text.includes('鰓') || text.includes('細胞') || text.includes('組織') || text.includes('石灰水')) secIdx = Math.min(1, u.sections.length - 1);
+        else secIdx = 0;
+      } else if (uHint === 'U4') {
+        if (text.includes('馬達') || text.includes('電鈴') || text.includes('起重機') || text.includes('電磁波') || text.includes('發電') || text.includes('漆包線')) secIdx = Math.min(2, u.sections.length - 1);
+        else if (text.includes('電磁鐵') || text.includes('線圈') || text.includes('電流磁效應') || text.includes('串聯') || text.includes('鐵棒')) secIdx = Math.min(1, u.sections.length - 1);
+        else secIdx = 0;
+      }
+    }
+    const sec = u.sections[secIdx] || u.sections[0];
+    return {
+      unitId: uHint,
+      unitTitle: u.unitTitle || u.title || uHint,
+      secIndex: secIdx,
+      secTitle: sec.title,
+      content: sec.content
+    };
+  }
 
   if (isSocial()) {
-    // 社會科智慧對應
-    // 1. 立法 / 行政 / 司法 / 考試 / 監察 / 五權 / 民意代表 / 公務人員
+    // 社會科智慧對應 (期中 U1~U2)
     if (text.includes('院') || text.includes('權') || text.includes('總統') || text.includes('民意代表') || text.includes('質詢') || text.includes('預算') || text.includes('彈劾') || text.includes('糾正') || text.includes('審計')) {
       const sec = reviews['U1'].sections[2];
-      return {
-        unitId: 'U1',
-        unitTitle: '第一單元 現代社會與民主政治',
-        secIndex: 2,
-        secTitle: sec.title,
-        content: sec.content
-      };
+      return { unitId: 'U1', unitTitle: '第一單元 現代社會與民主政治', secIndex: 2, secTitle: sec.title, content: sec.content };
     }
-    // 2. 憲法 / 人權 / 義務 / 投票 / 公民 / 救濟 / 公聽會 / 戒嚴 / 野百合 / 解嚴
     if (text.includes('憲法') || text.includes('人權') || text.includes('義務') || text.includes('納稅') || text.includes('投票') || text.includes('選舉') || text.includes('戒嚴') || text.includes('野百合') || text.includes('公聽會') || text.includes('地方自治') || text.includes('政黨')) {
       const sec = reviews['U1'].sections[1];
-      return {
-        unitId: 'U1',
-        unitTitle: '第一單元 現代社會與民主政治',
-        secIndex: 1,
-        secTitle: sec.title,
-        content: sec.content
-      };
+      return { unitId: 'U1', unitTitle: '第一單元 現代社會與民主政治', secIndex: 1, secTitle: sec.title, content: sec.content };
     }
-    // 3. 資訊倫理 / 職業 / 團體 / 法律位階 / 轉型正義 / 二二八
     if (text.includes('資訊') || text.includes('網路') || text.includes('著作權') || text.includes('團體') || text.includes('工會') || text.includes('二二八') || text.includes('轉型正義') || text.includes('民法') || text.includes('刑法') || text.includes('位階')) {
       const sec = reviews['U1'].sections[0];
-      return {
-        unitId: 'U1',
-        unitTitle: '第一單元 現代社會與民主政治',
-        secIndex: 0,
-        secTitle: sec.title,
-        content: sec.content
-      };
+      return { unitId: 'U1', unitTitle: '第一單元 現代社會與民主政治', secIndex: 0, secTitle: sec.title, content: sec.content };
     }
-    // 4. 少子化 / 高齡化 / 性別平權 / 都市化
     if (text.includes('少子化') || text.includes('高齡') || text.includes('老年') || text.includes('扶養') || text.includes('幼年') || text.includes('壯年') || text.includes('性別') || text.includes('長照') || text.includes('都市')) {
       const sec = reviews['U2'].sections[2];
-      return {
-        unitId: 'U2',
-        unitTitle: '第二單元 社會變遷與多元文化',
-        secIndex: 2,
-        secTitle: sec.title,
-        content: sec.content
-      };
+      return { unitId: 'U2', unitTitle: '第二單元 社會變遷與多元文化', secIndex: 2, secTitle: sec.title, content: sec.content };
     }
-    // 5. 多元文化 / 傳教士 / 馬偕 / 巴克禮 / 新住民 / 文化創新 / 世界遺產
     if (text.includes('馬偕') || text.includes('巴克禮') || text.includes('甘為霖') || text.includes('新住民') || text.includes('多元文化') || text.includes('文化') || text.includes('古蹟') || text.includes('遺產') || text.includes('霹靂') || text.includes('歌仔戲')) {
       const sec = reviews['U2'].sections[1];
-      return {
-        unitId: 'U2',
-        unitTitle: '第二單元 社會變遷與多元文化',
-        secIndex: 1,
-        secTitle: sec.title,
-        content: sec.content
-      };
+      return { unitId: 'U2', unitTitle: '第二單元 社會變遷與多元文化', secIndex: 1, secTitle: sec.title, content: sec.content };
     }
-    // 6. 戰後經濟 / 土地改革 / 耕者有其田 / 加工出口區 / 十大建設 / 竹科
     if (text.includes('三七五') || text.includes('耕者有其田') || text.includes('公地放領') || text.includes('加工出口') || text.includes('十大建設') || text.includes('科學園區') || text.includes('代工') || text.includes('進口替代') || text.includes('出口導向') || text.includes('經濟')) {
+      if (reviews['U3']?.sections?.length) {
+        const sec = reviews['U3'].sections[0];
+        return { unitId: 'U3', unitTitle: reviews['U3'].unitTitle || reviews['U3'].title, secIndex: 0, secTitle: sec.title, content: sec.content };
+      }
       const sec = reviews['U2'].sections[0];
-      return {
-        unitId: 'U2',
-        unitTitle: '第二單元 社會變遷與多元文化',
-        secIndex: 0,
-        secTitle: sec.title,
-        content: sec.content
-      };
+      return { unitId: 'U2', unitTitle: '第二單元 社會變遷與多元文化', secIndex: 0, secTitle: sec.title, content: sec.content };
     }
-    const sec = reviews['EXAM_MID1'].sections[0];
-    return {
-      unitId: 'EXAM_MID1',
-      unitTitle: '🏆 第一次段考社會衝刺錦囊',
-      secIndex: 0,
-      secTitle: sec.title,
-      content: sec.content
-    };
+    const fallbackUnitId = (q.unitId === 'EXAM_MID2' && reviews['EXAM_MID2']?.sections?.length) ? 'EXAM_MID2' : 'EXAM_MID1';
+    const sec = reviews[fallbackUnitId]?.sections?.[0];
+    return sec ? { unitId: fallbackUnitId, unitTitle: reviews[fallbackUnitId].unitTitle || '段考衝刺錦囊', secIndex: 0, secTitle: sec.title, content: sec.content } : null;
   }
   
-  // 1. 導電 / LED / 電解質
+  // 自然科智慧對應 (U1~U2 + fallback)
   if (text.includes('導電') || text.includes('led') || text.includes('二極體') || text.includes('電路') || text.includes('通路')) {
     const sec = reviews['U2'].sections[1];
-    return {
-      unitId: 'U2',
-      unitTitle: '第二單元 水溶液的奧祕',
-      secIndex: 1,
-      secTitle: sec.title,
-      content: sec.content
-    };
+    return { unitId: 'U2', unitTitle: '第二單元 水溶液的奧祕', secIndex: 1, secTitle: sec.title, content: sec.content };
   }
-  // 2. 酸鹼中和 / 胃藥 / 水垢 / 尿垢 / 清潔劑 / 石灰
   if (text.includes('中和') || text.includes('胃藥') || text.includes('水垢') || text.includes('尿垢') || text.includes('清潔劑') || text.includes('石灰') || text.includes('酸和鹼')) {
     const sec = reviews['U2'].sections[3];
-    return {
-      unitId: 'U2',
-      unitTitle: '第二單元 水溶液的奧祕',
-      secIndex: 3,
-      secTitle: sec.title,
-      content: sec.content
-    };
+    return { unitId: 'U2', unitTitle: '第二單元 水溶液的奧祕', secIndex: 3, secTitle: sec.title, content: sec.content };
   }
-  // 3. 指示劑 / 石蕊 / 蝶豆花 / 紫甘藍 / 紫高麗菜
   if (text.includes('石蕊') || text.includes('指示劑') || text.includes('蝶豆花') || text.includes('花青素') || text.includes('紫高麗菜') || text.includes('酸鹼性') || text.includes('變色')) {
     const sec = reviews['U2'].sections[2];
-    return {
-      unitId: 'U2',
-      unitTitle: '第二單元 水溶液的奧祕',
-      secIndex: 2,
-      secTitle: sec.title,
-      content: sec.content
-    };
+    return { unitId: 'U2', unitTitle: '第二單元 水溶液的奧祕', secIndex: 2, secTitle: sec.title, content: sec.content };
   }
-  // 4. 溶質 / 溶劑 / 溶解 / 重量 / 守恆 / 結晶 / 析出 / 蒸發
   if (text.includes('溶質') || text.includes('溶劑') || text.includes('溶解') || text.includes('守恆') || text.includes('結晶') || text.includes('水溶液') || text.includes('混合物')) {
     const sec = reviews['U2'].sections[0];
-    return {
-      unitId: 'U2',
-      unitTitle: '第二單元 水溶液的奧祕',
-      secIndex: 0,
-      secTitle: sec.title,
-      content: sec.content
-    };
+    return { unitId: 'U2', unitTitle: '第二單元 水溶液的奧祕', secIndex: 0, secTitle: sec.title, content: sec.content };
   }
-  // 5. 颱風 / 氣旋 / 颱風眼 / 風速 / 防颱
   if (text.includes('颱風') || text.includes('熱帶性低氣壓') || text.includes('颱風眼') || text.includes('防颱') || text.includes('白鹿') || text.includes('杜鵑') || text.includes('楊柳') || text.includes('泰利')) {
     const sec = reviews['U1'].sections[3];
-    return {
-      unitId: 'U1',
-      unitTitle: '第一單元 天氣的變化',
-      secIndex: 3,
-      secTitle: sec.title,
-      content: sec.content
-    };
+    return { unitId: 'U1', unitTitle: '第一單元 天氣的變化', secIndex: 3, secTitle: sec.title, content: sec.content };
   }
-  // 6. 冷鋒 / 暖鋒 / 滯留鋒 / 梅雨 / 天氣圖 / 高氣壓 / 低氣壓 / 氣團 / 等壓線 / 百帕
   if (text.includes('鋒') || text.includes('天氣圖') || text.includes('氣團') || text.includes('氣壓') || text.includes('等壓線') || text.includes('百帕') || text.includes('梅雨')) {
     const sec = reviews['U1'].sections[2];
-    return {
-      unitId: 'U1',
-      unitTitle: '第一單元 天氣的變化',
-      secIndex: 2,
-      secTitle: sec.title,
-      content: sec.content
-    };
+    return { unitId: 'U1', unitTitle: '第一單元 天氣的變化', secIndex: 2, secTitle: sec.title, content: sec.content };
   }
-  // 7. 露 / 霜 / 冰塊加鹽 / 培養皿
   if (text.includes('露') || text.includes('霜') || text.includes('冰塊加') || text.includes('食鹽降溫') || text.includes('冰晶')) {
     const sec = reviews['U1'].sections[1];
-    return {
-      unitId: 'U1',
-      unitTitle: '第一單元 天氣的變化',
-      secIndex: 1,
-      secTitle: sec.title,
-      content: sec.content
-    };
+    return { unitId: 'U1', unitTitle: '第一單元 天氣的變化', secIndex: 1, secTitle: sec.title, content: sec.content };
   }
-  // 8. 暖化 / 溫室氣體 / 碳足跡 / 水足跡 / 氣候變遷 / 聖嬰 / 永續
   if (text.includes('暖化') || text.includes('溫室') || text.includes('碳足跡') || text.includes('水足跡') || text.includes('氣候變遷') || text.includes('聖嬰') || text.includes('二氧化碳') || text.includes('甲烷')) {
     const sec = reviews['U1'].sections[4];
-    return {
-      unitId: 'U1',
-      unitTitle: '第一單元 天氣的變化',
-      secIndex: 4,
-      secTitle: sec.title,
-      content: sec.content
-    };
+    return { unitId: 'U1', unitTitle: '第一單元 天氣的變化', secIndex: 4, secTitle: sec.title, content: sec.content };
   }
-  // 9. 雲 / 霧 / 雨 / 雪 / 水蒸氣 / 水循環 / 蒸發 / 凝結 / 凝固 / 昇華
   if (text.includes('雲') || text.includes('霧') || text.includes('水蒸氣') || text.includes('水循環') || text.includes('白煙') || text.includes('凝結') || text.includes('蒸發')) {
     const sec = reviews['U1'].sections[0];
-    return {
-      unitId: 'U1',
-      unitTitle: '第一單元 天氣的變化',
-      secIndex: 0,
-      secTitle: sec.title,
-      content: sec.content
-    };
+    return { unitId: 'U1', unitTitle: '第一單元 天氣的變化', secIndex: 0, secTitle: sec.title, content: sec.content };
   }
 
-  // 預設 fallback 到段考錦囊
-  const sec = reviews['EXAM_MID1'].sections[0];
-  return {
-    unitId: 'EXAM_MID1',
-    unitTitle: '🏆 第一次段考衝刺錦囊',
-    secIndex: 0,
-    secTitle: sec.title,
-    content: sec.content
-  };
+  const fallbackUnitId = (q.unitId === 'EXAM_MID2' && reviews['EXAM_MID2']?.sections?.length) ? 'EXAM_MID2' : 'EXAM_MID1';
+  const sec = reviews[fallbackUnitId]?.sections?.[0];
+  return sec ? { unitId: fallbackUnitId, unitTitle: reviews[fallbackUnitId].unitTitle || reviews[fallbackUnitId].title || '🏆 段考衝刺錦囊', secIndex: 0, secTitle: sec.title, content: sec.content } : null;
 }
 
 // 選擇題各選項深度逐項解析
@@ -1175,6 +1190,407 @@ function renderReviewAccordionHtml(q) {
   `;
 }
 
+// ============================================================================
+// 4.1 4D 視覺積木、改錯高亮與分步診斷渲染器 (Schema v4D-SciSoc)
+// ============================================================================
+function renderVisualBlock(step) {
+  if (!step || step.type !== 'visual' || !step.data) return '';
+  const d = step.data;
+
+  if (step.kind === 'compare_table') {
+    const headers = Array.isArray(d.headers) ? d.headers : [];
+    const rows = Array.isArray(d.rows) ? d.rows : [];
+    const hiCol = typeof d.highlightCol === 'number' ? d.highlightCol : -1;
+    return `
+      <div class="visual-card visual-table-card">
+        <div class="visual-card-title">${escapeHtml(d.title || '對照表')}</div>
+        <div class="visual-table-scroll">
+          <table class="visual-table">
+            <thead>
+              <tr>
+                ${headers.map((h, i) => `<th class="${i === hiCol ? 'is-highlight-col' : ''}">${escapeHtml(h)}</th>`).join('')}
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map(r => `
+                <tr>
+                  ${(Array.isArray(r) ? r : []).map((cell, i) => `<td class="${i === hiCol ? 'is-highlight-col' : ''}">${escapeHtml(cell)}</td>`).join('')}
+                </tr>
+              `).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
+  if (step.kind === 'flow_axis') {
+    const nodes = Array.isArray(d.nodes) ? d.nodes : [];
+    const dirCls = d.direction === 'tb' ? 'flow-tb' : 'flow-lr';
+    return `
+      <div class="visual-card visual-flow-card">
+        <div class="visual-card-title">${escapeHtml(d.title || '流程／時間軸')}</div>
+        <div class="flow-nodes ${dirCls}">
+          ${nodes.map((n, idx) => `
+            <div class="flow-node ${n.highlight ? 'is-highlight' : ''}">
+              ${n.tag ? `<span class="flow-tag">${escapeHtml(n.tag)}</span>` : ''}
+              <div class="flow-label">${escapeHtml(n.label || '')}</div>
+              ${n.sub ? `<div class="flow-sub">${escapeHtml(n.sub)}</div>` : ''}
+            </div>
+            ${idx < nodes.length - 1 ? `<div class="flow-arrow" aria-hidden="true">${d.direction === 'tb' ? '⬇' : '➔'}</div>` : ''}
+          `).join('')}
+        </div>
+      </div>
+    `;
+  }
+
+  if (step.kind === 'svg') {
+    const rawSvg = typeof d.svg === 'string' ? d.svg.trim() : '';
+    const safeSvg = (rawSvg.startsWith('<svg') && !/<script/i.test(rawSvg)) ? rawSvg : '';
+    return `
+      <div class="visual-card visual-svg-card">
+        <div class="visual-card-title">${escapeHtml(d.title || '結構／方向示意圖')}</div>
+        <div class="visual-svg-wrap">${safeSvg}</div>
+        ${d.caption ? `<div class="visual-svg-caption">${escapeHtml(d.caption)}</div>` : ''}
+      </div>
+    `;
+  }
+
+  return '';
+}
+
+function renderCorrectionDiffHtml(diff) {
+  if (!diff || !diff.wrongSpan) return '';
+  return `
+    <div class="correction-diff-card">
+      <div class="diff-head">✏️ 錯處紅綠訂正對照</div>
+      <div class="diff-inline-row">
+        <del class="diff-wrong">${escapeHtml(diff.wrongSpan)}</del>
+        <span class="diff-arrow">➔</span>
+        <ins class="diff-right">${escapeHtml(diff.rightSpan || '')}</ins>
+      </div>
+      ${diff.correctedSentence ? `<div class="diff-full-sentence"><b>完整正確敘述：</b>${escapeHtml(diff.correctedSentence)}</div>` : ''}
+    </div>
+  `;
+}
+
+function renderDistractor4DHtml(item) {
+  const exp = item.explanation || {};
+  const da = exp.distractorAnalysis || {};
+  const qText = (item.question || '') + ' ' + (item.title || '');
+  const isAskingWrong = qText.includes('錯誤') || qText.includes('不是') || qText.includes('不正確') || qText.includes('何者非') || qText.includes('無法');
+
+  if (item.type === 'binary') {
+    const isO = item.correctAnswer === '○';
+    const daEntries = Object.entries(da);
+    return `
+      <div class="options-deep-breakdown binary-breakdown">
+        <div class="breakdown-title">
+          <span class="breakdown-icon">🔍</span>
+          <b>是非判斷與迷思抓包</b>
+        </div>
+        <div class="binary-exp-card ${isO ? 'binary-is-true' : 'binary-is-false'}">
+          <div class="binary-exp-status">${isO ? '🟢 本題敘述【正確 ○】' : '🔴 本題敘述【錯誤 ✕】'}</div>
+          ${daEntries.map(([k, v]) => `<div class="binary-exp-content"><b>誤判陷阱（選 ${escapeHtml(k)}）：</b>${escapeHtml(v)}</div>`).join('')}
+        </div>
+        ${!isO && item.correctionDiff ? renderCorrectionDiffHtml(item.correctionDiff) : ''}
+      </div>
+    `;
+  }
+
+  if (item.type === 'multi') {
+    return `
+      <div class="options-deep-breakdown">
+        <div class="breakdown-title"><span class="breakdown-icon">🔍</span><b>勾選項目逐項判定（應勾選 vs 陷阱破綻）</b></div>
+        <div class="breakdown-list">
+          ${(item.options || []).map((opt, idx) => `
+            <div class="opt-exp-row ${opt.isCorrect ? 'is-target-choice' : ''}">
+              <div class="opt-exp-header">
+                <span class="opt-exp-num">${idx + 1}</span>
+                <span class="opt-exp-text">${escapeHtml(opt.text)}</span>
+                ${opt.trapCode ? `<span class="trap-code-pill">${escapeHtml(opt.trapCode)}</span>` : ''}
+                <span class="opt-exp-badge ${opt.isCorrect ? 'opt-badge-correct-target' : 'opt-badge-wrong-fact'}">${opt.isCorrect ? '✔ 應勾選' : '✖ 不應勾選'}</span>
+              </div>
+              <div class="opt-exp-detail">${escapeHtml(opt.explanation || '')}</div>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `;
+  }
+
+  if (item.type === 'self_eval') {
+    const rubric = Array.isArray(item.scoringRubric) ? item.scoringRubric : (item.scoringRubric ? [item.scoringRubric] : []);
+    const daEntries = Object.entries(da);
+    return `
+      <div class="options-deep-breakdown">
+        <div class="breakdown-title"><span class="breakdown-icon">📋</span><b>採分要點與常見失分原因</b></div>
+        ${rubric.length ? `<ul class="rubric-list">${rubric.map(r => `<li>${escapeHtml(r)}</li>`).join('')}</ul>` : ''}
+        ${daEntries.map(([k, v]) => `<div class="opt-exp-row"><div class="opt-exp-detail"><b>⚠️ ${escapeHtml(k)}：</b>${escapeHtml(v)}</div></div>`).join('')}
+      </div>
+    `;
+  }
+
+  // mcq & match
+  const opts = item.options || [];
+  if (opts.length === 0) return '';
+  return `
+    <div class="options-deep-breakdown">
+      <div class="breakdown-title">
+        <span class="breakdown-icon">🔍</span>
+        <b>維度三：逐選項陷阱抓包 (Distractor Analysis)</b>
+      </div>
+      <div class="breakdown-list">
+        ${opts.map((opt, idx) => {
+          const optKey = opt.key || ['A', 'B', 'C', 'D', 'E', 'F'][idx] || String(idx + 1);
+          const isTarget = !!opt.isCorrect;
+          const badgeClass = isAskingWrong
+            ? (isTarget ? 'opt-badge-wrong-target' : 'opt-badge-correct-fact')
+            : (isTarget ? 'opt-badge-correct-target' : 'opt-badge-wrong-fact');
+          const badgeText = isAskingWrong
+            ? (isTarget ? '🔴 錯誤敘述（本題正解）' : '🟢 正確事實')
+            : (isTarget ? '🟢 正確答案' : '🔴 誘答陷阱');
+          const detail = da[optKey] || da[String(idx + 1)] || da[opt.text] || opt.explanation || (isTarget ? (exp.examPurpose || '符合核心原理與題幹條件。') : '與課本核心原理或題幹條件不符。');
+          return `
+            <div class="opt-exp-row ${isTarget ? 'is-target-choice' : ''}">
+              <div class="opt-exp-header">
+                <span class="opt-exp-num">${escapeHtml(optKey)}</span>
+                <span class="opt-exp-text">${escapeHtml(opt.text)}</span>
+                ${!isTarget && opt.trapCode ? `<span class="trap-code-pill">${escapeHtml(opt.trapCode)}</span>` : ''}
+                <span class="opt-exp-badge ${badgeClass}">${badgeText}</span>
+              </div>
+              <div class="opt-exp-detail">${escapeHtml(detail)}</div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function renderExtensionStudyHtml(ext) {
+  if (!ext) return '';
+  const rules = ext.coreRules || ext.coreFormulas || [];
+  return `
+    <div class="ext-study-card">
+      <div class="ext-study-head">🚀 3E 延伸自修密技</div>
+      ${rules.length ? `
+        <div class="ext-block">
+          <div class="ext-block-title">🔑 核心法則 (Core Rules)</div>
+          <ul class="ext-rules-list">${rules.map(r => `<li>${escapeHtml(r)}</li>`).join('')}</ul>
+        </div>
+      ` : ''}
+      ${ext.conceptCompare ? `
+        <div class="ext-block">
+          <div class="ext-block-title">⚖️ 易混淆雙胞胎對照</div>
+          <p>${escapeHtml(ext.conceptCompare)}</p>
+        </div>
+      ` : ''}
+      ${ext.examVariations ? `
+        <div class="ext-block">
+          <div class="ext-block-title">🔮 段考變形預測</div>
+          <p>${escapeHtml(ext.examVariations)}</p>
+        </div>
+      ` : ''}
+    </div>
+  `;
+}
+
+function render4DExplanationHtml(item, showExtension = true) {
+  const exp = item.explanation;
+  if (!exp) return '';
+  const steps = Array.isArray(exp.steps) ? exp.steps : [];
+
+  return `
+    <div class="exp-4d-wrap">
+      <div class="exp-4d-purpose">
+        <b>🎯 維度一・命題核心</b>
+        <p>${escapeHtml(exp.examPurpose || '')}</p>
+      </div>
+
+      ${steps.length ? `
+        <div class="exp-4d-steps">
+          <div class="exp-4d-steps-title">📐 維度二・分步推導與視覺化圖解</div>
+          ${steps.map(st => {
+            if (st.type === 'visual') return renderVisualBlock(st);
+            if (st.type === 'answer') return `<div class="step-answer-pill">✅ ${escapeHtml(st.text)}</div>`;
+            return `<div class="step-text-row">${escapeHtml(st.text)}</div>`;
+          }).join('')}
+        </div>
+      ` : ''}
+
+      ${renderDistractor4DHtml(item)}
+
+      ${(exp.figureNote || exp.insight) ? `
+        <div class="exp-4d-insights">
+          ${exp.insight ? `<div class="insight-banner"><b>💡 秒殺口訣：</b><span>${escapeHtml(exp.insight)}</span></div>` : ''}
+          ${exp.figureNote ? `<div class="figure-note-banner"><b>📊 維度四・視覺定錨：</b><span>${escapeHtml(exp.figureNote)}</span></div>` : ''}
+        </div>
+      ` : ''}
+
+      ${showExtension && item.extensionStudy ? renderExtensionStudyHtml(item.extensionStudy) : ''}
+    </div>
+  `;
+}
+
+function renderItemFeedbackHtml(item, isSubItem = false, parentGroup = null) {
+  if (item.explanation) {
+    return `
+      ${render4DExplanationHtml(item, !isSubItem)}
+      ${!isSubItem ? renderReviewAccordionHtml(item) : ''}
+    `;
+  }
+  const legacyBreakdown = item.type === 'mcq' || item.type === 'match'
+    ? renderOptionsExplanationHtml(item)
+    : item.type === 'binary'
+      ? renderBinaryExplanationHtml(item)
+      : item.type === 'multi'
+        ? renderMultiExplanationHtml(item)
+        : '';
+
+  return `
+    ${legacyBreakdown}
+    <div class="dual-explanation">
+      <div class="exp-core">
+        <b>${isSocial() ? '🏛️ 核心社會觀念與解析' : '🌿 核心科學觀念與原理'}</b>
+        <p>${escapeHtml(item.coreConcept || '依據課本核心原理與觀察。')}</p>
+      </div>
+      ${item.misconception ? `
+        <div class="exp-trap">
+          <b>⚠️ 迷思陷阱 / 易錯剖析</b>
+          <p>${escapeHtml(item.misconception)}</p>
+        </div>
+      ` : ''}
+    </div>
+    ${!isSubItem ? renderReviewAccordionHtml(item) : ''}
+  `;
+}
+
+function renderItemControlsHtml(item, ansObj, multiSet, isSelfEvalRevealed, subId = '') {
+  const isAnswered = !!ansObj;
+  const subAttr = subId ? `data-sub-id="${escapeHtml(subId)}"` : '';
+
+  if (item.type === 'binary') {
+    return `
+      <div class="binary-options">
+        <button class="btn-binary val-o ${getBinaryBtnClass(item, '○', ansObj)}" data-val="○" ${subAttr} ${isAnswered ? 'disabled' : ''}>
+          ○
+          <span class="label">正確${subId ? '' : ' (鍵盤: O 或 1)'}</span>
+        </button>
+        <button class="btn-binary val-x ${getBinaryBtnClass(item, '╳', ansObj)}" data-val="╳" ${subAttr} ${isAnswered ? 'disabled' : ''}>
+          ╳
+          <span class="label">錯誤${subId ? '' : ' (鍵盤: X 或 2)'}</span>
+        </button>
+      </div>
+    `;
+  }
+
+  if (item.type === 'multi') {
+    const curSet = multiSet || new Set();
+    return `
+      <div class="multi-options">
+        ${(item.options || []).map(opt => {
+          const optText = opt.text;
+          const isChecked = curSet.has(optText);
+          let statusCls = '';
+          let badgeHtml = '';
+          if (isAnswered) {
+            const userSelected = (ansObj.selected || []).includes(optText);
+            const shouldSelect = !!opt.isCorrect;
+            if (userSelected && shouldSelect) {
+              statusCls = 'ans-correct';
+              badgeHtml = '<span class="multi-status-badge" style="background:var(--ok); color:#fff;">✔ 正確勾選</span>';
+            } else if (userSelected && !shouldSelect) {
+              statusCls = 'ans-wrong';
+              badgeHtml = '<span class="multi-status-badge" style="background:var(--bad); color:#fff;">✘ 不應勾選</span>';
+            } else if (!userSelected && shouldSelect) {
+              statusCls = 'ans-missed';
+              badgeHtml = '<span class="multi-status-badge" style="background:#f59e0b; color:#fff;">⚠️ 漏選此項</span>';
+            }
+          } else if (isChecked) {
+            statusCls = 'checked';
+          }
+          const isBoxChecked = isChecked || (isAnswered && (ansObj.selected || []).includes(optText));
+          return `
+            <div class="btn-multi ${statusCls}" data-multi-opt="${escapeHtml(optText)}" ${subAttr} ${isAnswered ? 'style="cursor:default;"' : ''}>
+              <span class="multi-checkbox">${isBoxChecked ? '✔' : ''}</span>
+              <span class="multi-text">${escapeHtml(optText)}</span>
+              ${badgeHtml}
+            </div>
+          `;
+        }).join('')}
+      </div>
+      ${!isAnswered ? `
+        <div class="multi-submit-row">
+          <span class="multi-submit-hint">💡 多選勾選題，請選取所有符合的選項後送出</span>
+          <button type="button" class="btn-multi-submit" ${subId ? '' : 'id="btn-submit-multi"'} data-submit-multi="1" ${subAttr} ${curSet.size === 0 ? 'disabled' : ''}>
+            確認送出 (${curSet.size} 項)
+          </button>
+        </div>
+      ` : ''}
+    `;
+  }
+
+  if (item.type === 'self_eval') {
+    return `
+      <div class="self-eval-box">
+        <div class="self-eval-guide">
+          <span>✍️</span>
+          <div><b>紙筆實戰作答</b>：請先在紙上思考並寫下答案，寫完後點擊下方按鈕核對標準答案並自我評分！</div>
+        </div>
+        ${!isSelfEvalRevealed ? `
+          <button type="button" class="btn-reveal-answer" ${subId ? '' : 'id="btn-reveal-self-eval"'} data-reveal-self-eval="1" ${subAttr}>
+            <span>👁️ 我已在紙上寫完，點此看標準答案與詳解</span>
+          </button>
+        ` : `
+          <div class="self-eval-answer-card">
+            <div class="self-eval-ans-title">✅ 標準答案核對</div>
+            <div class="self-eval-ans-body">${escapeHtml(item.correctAnswer)}</div>
+          </div>
+          ${renderItemFeedbackHtml(item, true)}
+          ${!isAnswered ? `
+            <div style="text-align:center; font-weight:800; color:var(--ink); margin:12px 0 8px;">👇 請對照答案，誠實選擇你的作答結果：</div>
+            <div class="self-eval-judge-row">
+              <button type="button" class="btn-self-judge judge-ok" data-self-judge="ok" ${subAttr}>
+                <span class="judge-icon">⭕</span><span>我答對了！</span><small>記為答對</small>
+              </button>
+              <button type="button" class="btn-self-judge judge-bad" data-self-judge="bad" ${subAttr}>
+                <span class="judge-icon">❌</span><span>寫錯 / 不熟</span><small>加入錯題本</small>
+              </button>
+            </div>
+          ` : `
+            <div class="self-eval-judge-row">
+              <button type="button" class="btn-self-judge judge-ok ${ansObj.result === 'ok' ? 'selected' : ''}" disabled>
+                <span class="judge-icon">⭕</span><span>我答對了！${ansObj.result === 'ok' ? '（已選）' : ''}</span>
+              </button>
+              <button type="button" class="btn-self-judge judge-bad ${ansObj.result === 'bad' ? 'selected' : ''}" disabled>
+                <span class="judge-icon">❌</span><span>寫錯 / 不熟${ansObj.result === 'bad' ? '（已記錄）' : ''}</span>
+              </button>
+            </div>
+          `}
+        `}
+      </div>
+    `;
+  }
+
+  // mcq or match
+  const isMatch = item.type === 'match';
+  return `
+    <div class="${isMatch ? 'match-options-grid' : 'mcq-options'}">
+      ${(item.options || []).map((opt, oIdx) => {
+        const optBadge = opt.key || String(oIdx + 1);
+        const btnClass = getMcqBtnClass(item, opt, isAnswered, ansObj);
+        return `
+          <button class="btn-mcq ${isMatch ? 'btn-match' : ''} ${btnClass}" data-opt-idx="${oIdx}" ${subAttr} ${isAnswered ? 'disabled' : ''}>
+            <span class="opt-idx">${escapeHtml(optBadge)}</span>
+            <span>${escapeHtml(opt.text)}</span>
+          </button>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
 function startQuizSession(title, subtitle, questions, mode, unitId = 'EXAM_MID1') {
   state.quizTitle = title;
   state.quizSubtitle = subtitle;
@@ -1185,6 +1601,9 @@ function startQuizSession(title, subtitle, questions, mode, unitId = 'EXAM_MID1'
   state.answers = {};
   state.multiSelections = {};
   state.selfEvalRevealed = {};
+  state.subAnswers = {};
+  state.subMultiSelections = {};
+  state.subSelfEvalRevealed = {};
   state.drawerOpen = false;
   state.sessionStartTime = Date.now();
   state.questionStartTime = Date.now();
@@ -1216,26 +1635,30 @@ function renderQuizView() {
   const ccMap = getCorrectCounts();
   const inErrorBook = getErrorBook().includes(q.id);
 
-  // 1. 段考學校切換標籤 (schoolTabsHtml) — 當在 EXAM_MID1 時呈現
+  // 1. 段考學校切換標籤 (支援 EXAM_MID1 與 EXAM_MID2)
   let schoolTabsHtml = '';
-  if (state.currentUnitId === 'EXAM_MID1') {
-    const schools = getActiveSchools();
+  if (isExamUnitId(state.currentUnitId)) {
+    const schools = getActiveSchools(state.currentUnitId);
+    const curSch = getExamSchool(state.currentUnitId);
     schoolTabsHtml = `
       <div class="exam-school-tabs-wrap">
         <div class="exam-tabs-header">🏫 切換段考學校試卷：</div>
         <div class="exam-school-tabs">
-          ${schools.map(s => `
-            <button type="button" class="school-tab-btn ${state.examSchool === s.id ? 'active' : ''}" data-school-tab="${s.id}">
-              <span>${s.shortName}</span>
-              <span class="badge-cnt">${s.count || 0}</span>
-            </button>
-          `).join('')}
+          ${schools.map(s => {
+            const cnt = typeof s.count === 'number' && s.count > 0 ? s.count : getFilteredQuestions(state.currentUnitId, s.id).length;
+            return `
+              <button type="button" class="school-tab-btn ${curSch === s.id ? 'active' : ''}" data-school-tab="${s.id}">
+                <span>${s.shortName}</span>
+                <span class="badge-cnt">${cnt}</span>
+              </button>
+            `;
+          }).join('')}
         </div>
       </div>
     `;
   }
 
-  // 2. 題號速跳抽屜盤（位於題目正上方，46x42px，淨錯誤深淺色階）
+  // 2. 題號速跳抽屜盤
   const drawerBtnsHtml = qs.map((item, i) => {
     const curCls = i === idx ? 'current' : '';
     const errCnt = ecMap[item.id] || 0;
@@ -1252,20 +1675,27 @@ function renderQuizView() {
     `;
   }).join('');
 
-  const typeLabel = q.type === 'binary'
-    ? '是非題'
-    : q.type === 'multi'
-      ? '複選題'
-      : q.type === 'self_eval'
-        ? '✍️ 紙筆實戰大題'
-        : '選擇題';
+  const typeLabel = q.type === 'group'
+    ? `📋 綜合題組 (${(q.subQuestions || []).length} 小題)`
+    : q.type === 'binary'
+      ? '是非題'
+      : q.type === 'multi'
+        ? '複選題'
+        : q.type === 'match'
+          ? '配合題'
+          : q.type === 'self_eval'
+            ? '✍️ 紙筆實戰大題'
+            : '選擇題';
+
+  const cardInlineImage = q.stemImage || q.image;
+  const subAnsMap = state.subAnswers[q.id] || {};
+  const subMultiMap = state.subMultiSelections[q.id] || {};
+  const subRevealMap = state.subSelfEvalRevealed[q.id] || {};
 
   return `
     <div class="view quiz-view">
-      <!-- 學校切換標籤列 -->
       ${schoolTabsHtml}
 
-      <!-- 測驗頂部導覽列 -->
       <div class="quiz-head">
         <div class="quiz-nav-left">
           <button type="button" class="btn btn-ghost btn-sm" id="btn-quit-quiz">← 返回</button>
@@ -1283,7 +1713,6 @@ function renderQuizView() {
         </div>
       </div>
 
-      <!-- 頂部嵌入式折疊題號盤 (Grid Drawer — 位於題目正上方) -->
       <div id="quiz-grid-drawer" class="quiz-grid-drawer" style="display: ${state.drawerOpen ? 'block' : 'none'};">
         <div class="grid-drawer-head">
           <div class="drawer-legend-bar">
@@ -1293,24 +1722,22 @@ function renderQuizView() {
           </div>
           <button type="button" class="btn-close-drawer" id="btn-close-drawer">✕</button>
         </div>
-        <div class="drawer-q-grid">
-          ${drawerBtnsHtml}
-        </div>
+        <div class="drawer-q-grid">${drawerBtnsHtml}</div>
       </div>
 
-      <!-- 題目卡片 (.q-card) -->
       <article class="q-card">
         <div class="q-top-action-bar">
           <div class="q-tags">
             <span class="tag type">${typeLabel}</span>
-            <span class="tag school">${q.school}</span>
-            <span class="tag">${q.domain || q.unitName}</span>
+            ${q.level ? `<span class="tag level-tag">L${q.level}</span>` : ''}
+            <span class="tag school">${escapeHtml(q.school || '精選題庫')}</span>
+            <span class="tag">${escapeHtml(q.domain || q.sectionName || q.unitName || q.targetUnitId || '')}</span>
             <span class="stars">${'★'.repeat(q.difficulty || 2)}</span>
           </div>
           <div style="display: flex; gap: 8px; align-items: center;">
             ${q.examPageImage ? `
               <button class="btn btn-sm btn-ghost btn-view-exam-page" data-page-img="${q.examPageImage}" title="查看整頁考卷原稿" type="button">
-                📄 考卷原稿
+                📄 查看整頁原卷
               </button>
             ` : ''}
             <button class="btn btn-sm btn-ghost" id="btn-toggle-bookmark" style="${inErrorBook ? 'color: var(--bad); border-color: var(--bad);' : ''}">
@@ -1319,187 +1746,66 @@ function renderQuizView() {
           </div>
         </div>
 
-        <!-- 閱讀短文 / 背景情境 -->
         ${q.passage ? `
           <div class="reading-passage">
-            <div class="passage-header">📖 閱讀短文 / 題組完整背景資料</div>
+            <div class="passage-header">📖 閱讀短文 / 實驗與背景資料</div>
             <div class="passage-content">${escapeHtml(q.passage)}</div>
           </div>
         ` : ''}
 
         <div class="q-text">${escapeHtml(q.question)}</div>
 
-        <!-- 考卷截圖 / 實驗圖表 -->
-        ${q.image ? `
-          <div class="diagram-box">
-            <img src="${q.image}" alt="考卷圖表" class="diagram-img" data-caption="${escapeHtml(q.question)}" />
+        ${cardInlineImage ? `
+          <div class="diagram-box stem-image-box">
+            <img src="${cardInlineImage}" alt="題目圖表" class="diagram-img stem-inline-img" data-caption="${escapeHtml(q.question)}" />
             <span class="diagram-hint">🔍 點擊圖片可放大</span>
           </div>
         ` : ''}
 
-        <!-- 是非題大型選項鍵 (Binary) -->
-        ${q.type === 'binary' ? `
-          <div class="binary-options">
-            <button class="btn-binary val-o ${getBinaryBtnClass(q, '○')}" data-val="○" ${isAnswered ? 'disabled' : ''}>
-              ○
-              <span class="label">正確 (鍵盤: O 或 1)</span>
-            </button>
-            <button class="btn-binary val-x ${getBinaryBtnClass(q, '╳')}" data-val="╳" ${isAnswered ? 'disabled' : ''}>
-              ╳
-              <span class="label">錯誤 (鍵盤: X 或 2)</span>
-            </button>
-          </div>
-        ` : q.type === 'multi' ? `
-          <!-- 複選題勾選介面 (Multi-Select) -->
-          <div class="multi-options">
-            ${(q.options || []).map((opt, oIdx) => {
-              const optText = opt.text;
-              const curSet = state.multiSelections[q.id] || new Set();
-              const isChecked = curSet.has(optText);
-              let statusCls = '';
-              let badgeHtml = '';
-              if (isAnswered) {
-                const userSelected = (qAns.selected || []).includes(optText);
-                const shouldSelect = !!opt.isCorrect;
-                if (userSelected && shouldSelect) {
-                  statusCls = 'ans-correct';
-                  badgeHtml = '<span class="multi-status-badge" style="background:var(--ok); color:#fff;">✔ 正確勾選</span>';
-                } else if (userSelected && !shouldSelect) {
-                  statusCls = 'ans-wrong';
-                  badgeHtml = '<span class="multi-status-badge" style="background:var(--bad); color:#fff;">✘ 不應勾選</span>';
-                } else if (!userSelected && shouldSelect) {
-                  statusCls = 'ans-missed';
-                  badgeHtml = '<span class="multi-status-badge" style="background:#f59e0b; color:#fff;">⚠️ 漏選此項</span>';
-                }
-              } else if (isChecked) {
-                statusCls = 'checked';
-              }
-
-              const isBoxChecked = isChecked || (isAnswered && (qAns.selected || []).includes(optText));
+        ${q.type === 'group' ? `
+          <!-- 同卡多子題互動題組 (Group) -->
+          <div class="group-subq-list">
+            ${(q.subQuestions || []).map((sub, sIdx) => {
+              const subAns = subAnsMap[sub.subId];
+              const subImg = sub.stemImage || sub.image;
+              const subRevealed = !!subRevealMap[sub.subId] || !!subAns;
+              const statusBadge = subAns
+                ? (subAns.result === 'ok'
+                  ? '<span class="subq-status-pill ok">⭕ 答對</span>'
+                  : '<span class="subq-status-pill bad">❌ 答錯</span>')
+                : '<span class="subq-status-pill pending">待作答</span>';
               return `
-                <div class="btn-multi ${statusCls}" data-multi-opt="${escapeHtml(optText)}" ${isAnswered ? 'style="cursor:default;"' : ''}>
-                  <span class="multi-checkbox">${isBoxChecked ? '✔' : ''}</span>
-                  <span class="multi-text">${escapeHtml(optText)}</span>
-                  ${badgeHtml}
-                </div>
-              `;
-            }).join('')}
-          </div>
-          ${!isAnswered ? `
-            <div class="multi-submit-row">
-              <span class="multi-submit-hint">💡 本題為多選勾選題，請選取所有符合的選項後送出</span>
-              <button type="button" class="btn-multi-submit" id="btn-submit-multi" ${(state.multiSelections[q.id] || new Set()).size === 0 ? 'disabled' : ''}>
-                確認送出 (${(state.multiSelections[q.id] || new Set()).size} 項)
-              </button>
-            </div>
-          ` : ''}
-        ` : q.type === 'self_eval' ? `
-          <!-- 紙筆實戰與自我批改大題 (Self-Eval) -->
-          <div class="self-eval-box">
-            <div class="self-eval-guide">
-              <span>✍️</span>
-              <div>
-                <b>紙筆實戰大題（整大題一次呈現）</b>：請先拿紙筆把上面各小題的代號、配對或簡答寫下來，寫完後點擊下方按鈕核對標準答案並自我評分！
-              </div>
-            </div>
-
-            ${!isSelfEvalRevealed ? `
-              <button type="button" class="btn-reveal-answer" id="btn-reveal-self-eval">
-                <span>👁️ 我已在紙上寫完，點此看標準答案與詳解</span>
-              </button>
-            ` : `
-              <div class="self-eval-answer-card">
-                <div class="self-eval-ans-title">✅ 標準答案核對</div>
-                <div class="self-eval-ans-body">${escapeHtml(q.correctAnswer)}</div>
-              </div>
-
-              <!-- 雙色詳解 -->
-              <div class="dual-explanation" style="margin-bottom: 14px;">
-                <div class="exp-core">
-                  <b>${isSocial() ? '🏛️ 核心社會觀念與解析' : '🌿 核心科學觀念與原理'}</b>
-                  <p>${escapeHtml(q.coreConcept || '依據課本核心觀念與圖表判讀。')}</p>
-                </div>
-                ${q.misconception ? `
-                  <div class="exp-trap">
-                    <b>⚠️ 迷思陷阱 / 易錯剖析</b>
-                    <p>${escapeHtml(q.misconception)}</p>
+                <section class="group-subq-card ${subAns ? (subAns.result === 'ok' ? 'subq-ok' : 'subq-bad') : ''}">
+                  <div class="subq-head">
+                    <span class="subq-label">${escapeHtml(sub.label || `(${sIdx + 1})`)}</span>
+                    <div class="subq-question">${escapeHtml(sub.question)}</div>
+                    ${statusBadge}
                   </div>
-                ` : ''}
-              </div>
-
-              ${!isAnswered ? `
-                <div style="text-align:center; font-weight:800; color:var(--ink); margin-bottom:8px;">
-                  👇 請對照紙上的答案，誠實選擇你的作答結果：
-                </div>
-                <div class="self-eval-judge-row">
-                  <button type="button" class="btn-self-judge judge-ok" data-self-judge="ok">
-                    <span class="judge-icon">⭕</span>
-                    <span>我全部答對了！</span>
-                    <small style="font-weight:500; opacity:0.85;">記為答對 1 次</small>
-                  </button>
-                  <button type="button" class="btn-self-judge judge-bad" data-self-judge="bad">
-                    <span class="judge-icon">❌</span>
-                    <span>我有寫錯 / 不熟</span>
-                    <small style="font-weight:500; opacity:0.85;">自動加入錯題本方便複習</small>
-                  </button>
-                </div>
-              ` : `
-                <div class="self-eval-judge-row">
-                  <button type="button" class="btn-self-judge judge-ok ${qAns.result === 'ok' ? 'selected' : ''}" disabled>
-                    <span class="judge-icon">⭕</span>
-                    <span>我全部答對了！${qAns.result === 'ok' ? '（已選）' : ''}</span>
-                  </button>
-                  <button type="button" class="btn-self-judge judge-bad ${qAns.result === 'bad' ? 'selected' : ''}" disabled>
-                    <span class="judge-icon">❌</span>
-                    <span>我有寫錯 / 不熟${qAns.result === 'bad' ? '（已存入錯題本）' : ''}</span>
-                  </button>
-                </div>
-              `}
-
-              ${renderReviewAccordionHtml(q)}
-            `}
-          </div>
-        ` : `
-          <!-- 選擇題四選一 (MCQ) -->
-          <div class="mcq-options">
-            ${q.options.map((opt, oIdx) => {
-              const optNum = oIdx + 1;
-              const btnClass = getMcqBtnClass(q, opt, isAnswered);
-              return `
-                <button class="btn-mcq ${btnClass}" data-opt-idx="${oIdx}" ${isAnswered ? 'disabled' : ''}>
-                  <span class="opt-idx">${optNum}</span>
-                  <span>${escapeHtml(opt.text)}</span>
-                </button>
+                  ${subImg ? `
+                    <div class="diagram-box stem-image-box" style="margin:10px 0;">
+                      <img src="${subImg}" alt="子題圖表" class="diagram-img stem-inline-img" data-caption="${escapeHtml(sub.question)}" />
+                      <span class="diagram-hint">🔍 點擊圖片可放大</span>
+                    </div>
+                  ` : ''}
+                  ${renderItemControlsHtml(sub, subAns, subMultiMap[sub.subId], subRevealed, sub.subId)}
+                  ${subAns && sub.type !== 'self_eval' ? renderItemFeedbackHtml(sub, true, q) : ''}
+                </section>
               `;
             }).join('')}
           </div>
-        `}
-
-        <!-- 答題詳解區 (非 self_eval 題型於作答後呈現) -->
-        ${isAnswered && q.type !== 'self_eval' ? `
-          <!-- 1. 深度選項剖析（對的為什麼對・錯的為什麼錯） -->
-          ${q.type === 'mcq' ? renderOptionsExplanationHtml(q) : q.type === 'binary' ? renderBinaryExplanationHtml(q) : renderMultiExplanationHtml(q)}
-
-          <!-- 2. 雙色教研詳解（核心觀念與迷思陷阱） -->
-          <div class="dual-explanation">
-            <div class="exp-core">
-              <b>${isSocial() ? '🏛️ 核心社會觀念與解析' : '🌿 核心科學觀念與原理'}</b>
-              <p>${escapeHtml(q.coreConcept || '依據課本核心原理與觀察。')}</p>
+          ${isAnswered ? `
+            <div class="group-summary-banner ${qAns.result === 'ok' ? 'ok' : 'bad'}">
+              ${qAns.result === 'ok' ? '🏆 整組小題全部答對！已記錄掌握次數' : '🔥 本題組尚有答錯小題，已自動收入錯題本'}
             </div>
-            ${q.misconception ? `
-              <div class="exp-trap">
-                <b>⚠️ 迷思陷阱 / 易錯剖析</b>
-                <p>${escapeHtml(q.misconception)}</p>
-              </div>
-            ` : ''}
-          </div>
-
-          <!-- 3. 本題重點整理延伸伸縮折疊標籤 -->
-          ${renderReviewAccordionHtml(q)}
-        ` : ''}
+            ${q.extensionStudy ? renderExtensionStudyHtml(q.extensionStudy) : ''}
+            ${renderReviewAccordionHtml(q)}
+          ` : ''}
+        ` : `
+          ${renderItemControlsHtml(q, qAns, state.multiSelections[q.id], isSelfEvalRevealed, '')}
+          ${isAnswered && q.type !== 'self_eval' ? renderItemFeedbackHtml(q, false, null) : ''}
+        `}
       </article>
 
-      <!-- 測驗底部導覽 -->
       <div class="quiz-bottom-nav">
         <div style="display:flex; gap:8px;">
           <button type="button" class="btn btn-ghost" id="btn-prev-q" ${idx === 0 ? 'disabled' : ''}>← 上一題</button>
@@ -1513,8 +1819,8 @@ function renderQuizView() {
   `;
 }
 
-function getBinaryBtnClass(q, val) {
-  const ans = state.answers[q.id];
+function getBinaryBtnClass(q, val, ansOverride = null) {
+  const ans = ansOverride !== null ? ansOverride : state.answers[q.id];
   if (!ans) return '';
   const correctVal = q.correctAnswer;
   if (ans.selected === val) {
@@ -1524,9 +1830,9 @@ function getBinaryBtnClass(q, val) {
   return '';
 }
 
-function getMcqBtnClass(q, opt, isAnswered) {
+function getMcqBtnClass(q, opt, isAnswered, ansOverride = null) {
   if (!isAnswered) return '';
-  const ans = state.answers[q.id];
+  const ans = ansOverride !== null ? ansOverride : state.answers[q.id];
   if (ans && ans.selected === opt.text) {
     return opt.isCorrect ? 'selected-correct' : 'selected-wrong';
   }
@@ -1558,7 +1864,6 @@ function bindQuizEvents() {
   document.getElementById('btn-next-q-top')?.addEventListener('click', handleNext);
   document.getElementById('btn-next-q')?.addEventListener('click', handleNext);
 
-  // 頂部題號盤折疊開關 (點擊上方按鈕向下展開)
   const toggleDrawer = () => {
     state.drawerOpen = !state.drawerOpen;
     const d = document.getElementById('quiz-grid-drawer');
@@ -1572,23 +1877,20 @@ function bindQuizEvents() {
     if (d) d.style.display = 'none';
   });
 
-  // 點擊題號盤按鈕跳轉
   document.querySelectorAll('.drawer-q-btn').forEach(btn => {
     btn.addEventListener('click', () => {
-      const targetIdx = parseInt(btn.getAttribute('data-jump-idx'), 10);
-      state.quizIndex = targetIdx;
+      state.quizIndex = parseInt(btn.getAttribute('data-jump-idx'), 10);
       state.drawerOpen = false;
       state.questionStartTime = Date.now();
       render();
     });
   });
 
-  // 學校切換標籤列 (schoolTabs)
-  document.querySelectorAll('.school-tab-btn').forEach(btn => {
+  document.querySelectorAll('.school-tab-btn[data-school-tab]').forEach(btn => {
     btn.addEventListener('click', () => {
       const schId = btn.getAttribute('data-school-tab');
-      state.examSchool = schId;
-      const filtered = getFilteredQuestions('EXAM_MID1', schId);
+      setExamSchool(state.currentUnitId, schId);
+      const filtered = getFilteredQuestions(state.currentUnitId, schId);
       state.quizQuestions = filtered;
       state.quizIndex = 0;
       state.drawerOpen = false;
@@ -1597,7 +1899,6 @@ function bindQuizEvents() {
     });
   });
 
-  // 收藏/移除錯題本
   document.getElementById('btn-toggle-bookmark')?.addEventListener('click', () => {
     const q = state.quizQuestions[state.quizIndex];
     const eb = getErrorBook();
@@ -1611,81 +1912,104 @@ function bindQuizEvents() {
     render();
   });
 
-  // 是非題作答
+  // 是非題作答（支援單題與 group 子題）
   document.querySelectorAll('.btn-binary').forEach(btn => {
     btn.addEventListener('click', () => {
       const val = btn.getAttribute('data-val');
-      submitAnswer(val);
+      const subId = btn.getAttribute('data-sub-id');
+      if (subId) submitSubAnswer(subId, val);
+      else submitAnswer(val);
     });
   });
 
-  // 選擇題作答
+  // 選擇／配合題作答（支援單題與 group 子題）
   document.querySelectorAll('.btn-mcq').forEach(btn => {
     btn.addEventListener('click', () => {
       const optIdx = parseInt(btn.getAttribute('data-opt-idx'), 10);
+      const subId = btn.getAttribute('data-sub-id');
       const q = state.quizQuestions[state.quizIndex];
-      const opt = q.options[optIdx];
-      if (opt) submitAnswer(opt.text, opt.isCorrect);
+      if (subId) {
+        const sub = (q.subQuestions || []).find(s => s.subId === subId);
+        const opt = sub?.options?.[optIdx];
+        if (opt) submitSubAnswer(subId, opt.text, opt.isCorrect);
+      } else {
+        const opt = q.options?.[optIdx];
+        if (opt) submitAnswer(opt.text, opt.isCorrect);
+      }
     });
   });
 
-  // 複選題項目點選 (切換選取狀態)
+  // 複選題點選切換（支援單題與 group 子題）
   document.querySelectorAll('.btn-multi').forEach(btn => {
     btn.addEventListener('click', () => {
       const q = state.quizQuestions[state.quizIndex];
-      if (state.answers[q.id]) return;
+      const subId = btn.getAttribute('data-sub-id');
       const optText = btn.getAttribute('data-multi-opt');
-      if (!state.multiSelections[q.id]) {
-        state.multiSelections[q.id] = new Set();
-      }
-      const set = state.multiSelections[q.id];
-      if (set.has(optText)) {
-        set.delete(optText);
+      if (subId) {
+        if (state.subAnswers[q.id]?.[subId]) return;
+        if (!state.subMultiSelections[q.id]) state.subMultiSelections[q.id] = {};
+        if (!state.subMultiSelections[q.id][subId]) state.subMultiSelections[q.id][subId] = new Set();
+        const s = state.subMultiSelections[q.id][subId];
+        s.has(optText) ? s.delete(optText) : s.add(optText);
       } else {
-        set.add(optText);
+        if (state.answers[q.id]) return;
+        if (!state.multiSelections[q.id]) state.multiSelections[q.id] = new Set();
+        const s = state.multiSelections[q.id];
+        s.has(optText) ? s.delete(optText) : s.add(optText);
       }
       render();
     });
   });
 
-  // 複選題送出答案
-  document.getElementById('btn-submit-multi')?.addEventListener('click', () => {
-    submitMultiAnswer();
-  });
-
-  // 紙筆自評大題：展開看標準答案
-  document.getElementById('btn-reveal-self-eval')?.addEventListener('click', () => {
-    const q = state.quizQuestions[state.quizIndex];
-    if (!state.selfEvalRevealed) state.selfEvalRevealed = {};
-    state.selfEvalRevealed[q.id] = true;
-    render();
-  });
-
-  // 紙筆自評大題：自我評分 (全對 / 有錯)
-  document.querySelectorAll('[data-self-judge]').forEach(btn => {
+  // 複選題送出
+  document.querySelectorAll('[data-submit-multi]').forEach(btn => {
     btn.addEventListener('click', () => {
-      const res = btn.getAttribute('data-self-judge');
-      submitSelfEvalAnswer(res === 'ok');
+      const subId = btn.getAttribute('data-sub-id');
+      if (subId) submitSubMultiAnswer(subId);
+      else submitMultiAnswer();
     });
   });
 
-  // 圖片放大燈箱
+  // 紙筆自評展開看標準答案
+  document.querySelectorAll('[data-reveal-self-eval]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const q = state.quizQuestions[state.quizIndex];
+      const subId = btn.getAttribute('data-sub-id');
+      if (subId) {
+        if (!state.subSelfEvalRevealed[q.id]) state.subSelfEvalRevealed[q.id] = {};
+        state.subSelfEvalRevealed[q.id][subId] = true;
+      } else {
+        if (!state.selfEvalRevealed) state.selfEvalRevealed = {};
+        state.selfEvalRevealed[q.id] = true;
+      }
+      render();
+    });
+  });
+
+  // 紙筆自評選擇全對／有錯
+  document.querySelectorAll('[data-self-judge]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const res = btn.getAttribute('data-self-judge');
+      const subId = btn.getAttribute('data-sub-id');
+      if (subId) submitSubSelfEvalAnswer(subId, res === 'ok');
+      else submitSelfEvalAnswer(res === 'ok');
+    });
+  });
+
   document.querySelectorAll('.diagram-img').forEach(img => {
     img.addEventListener('click', () => {
       openLightbox(img.src, img.getAttribute('data-caption') || '');
     });
   });
 
-  // 查看考卷原稿
   document.querySelectorAll('.btn-view-exam-page').forEach(btn => {
     btn.addEventListener('click', () => {
       const src = btn.getAttribute('data-page-img');
       const q = state.quizQuestions[state.quizIndex];
-      openLightbox(src, `${q.school} ${q.domain || ''} 原始考卷整頁對照`);
+      openLightbox(src, `${q.school || ''} ${q.domain || ''} 原始考卷整頁對照`);
     });
   });
 
-  // 重點延伸伸縮折疊標籤開關
   document.getElementById('btn-toggle-review-exp')?.addEventListener('click', () => {
     const drawer = document.getElementById('review-exp-drawer');
     const btn = document.getElementById('btn-toggle-review-exp');
@@ -1693,16 +2017,10 @@ function bindQuizEvents() {
     if (!drawer || !btn) return;
     const isHidden = drawer.style.display === 'none';
     drawer.style.display = isHidden ? 'block' : 'none';
-    if (isHidden) {
-      btn.classList.add('active');
-      if (pill) pill.textContent = '收起複習 ▴';
-    } else {
-      btn.classList.remove('active');
-      if (pill) pill.textContent = '點擊展開複習 ▾';
-    }
+    btn.classList.toggle('active', isHidden);
+    if (pill) pill.textContent = isHidden ? '收起複習 ▴' : '點擊展開複習 ▾';
   });
 
-  // 跳轉至完整講義對應章節
   document.querySelectorAll('.btn-goto-full-review').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -1718,10 +2036,7 @@ function bindQuizEvents() {
   });
 }
 
-function submitSelfEvalAnswer(isCorrect) {
-  const q = state.quizQuestions[state.quizIndex];
-  if (state.answers[q.id]) return;
-
+function recordQuestionOutcome(q, isCorrect, selectedValue, toastOkMsg = '', toastBadMsg = '') {
   const durationSec = Math.max(1, Math.round((Date.now() - state.questionStartTime) / 1000));
   const ecMap = getErrorCounts();
   const ccMap = getCorrectCounts();
@@ -1730,20 +2045,19 @@ function submitSelfEvalAnswer(isCorrect) {
   if (isCorrect) {
     ccMap[q.id] = (ccMap[q.id] || 0) + 1;
     saveCorrectCounts(ccMap);
-    showToast('太棒了！已記為答對 ⭕');
+    if (toastOkMsg) showToast(toastOkMsg);
   } else {
     ecMap[q.id] = (ecMap[q.id] || 0) + 1;
     saveErrorCounts(ecMap);
     if (!eb.includes(q.id)) {
       saveErrorBook([...eb, q.id]);
     }
-    showToast('已加入錯題本 🔥 之後可隨時重刷');
+    if (toastBadMsg) showToast(toastBadMsg);
   }
 
-  const selText = isCorrect ? '紙筆自評：全對' : '紙筆自評：有錯需加強';
   state.answers[q.id] = {
     result: isCorrect ? 'ok' : 'bad',
-    selected: selText,
+    selected: selectedValue,
     revealed: true,
     timeSeconds: durationSec
   };
@@ -1754,123 +2068,108 @@ function submitSelfEvalAnswer(isCorrect) {
     type: q.type,
     unitId: q.unitId,
     school: q.school,
-    selected: selText,
+    selected: selectedValue,
     isCorrect,
     durationSec
   });
 
-  pushSlimLogToCloud(q, isCorrect, selText, durationSec);
+  pushSlimLogToCloud(q, isCorrect, selectedValue, durationSec);
+}
 
+function evaluateSingleChoice(item, selectedText, explicitCorrect) {
+  if (item.type === 'binary') return selectedText === item.correctAnswer;
+  if (explicitCorrect !== undefined) return !!explicitCorrect;
+  const opt = (item.options || []).find(o => o.text === selectedText);
+  return !!opt?.isCorrect;
+}
+
+function submitSelfEvalAnswer(isCorrect) {
+  const q = state.quizQuestions[state.quizIndex];
+  if (state.answers[q.id]) return;
+  const selText = isCorrect ? '紙筆自評：全對' : '紙筆自評：有錯需加強';
+  recordQuestionOutcome(q, isCorrect, selText, '太棒了！已記為答對 ⭕', '已加入錯題本 🔥 之後可隨時重刷');
   render();
 }
 
 function submitAnswer(selectedText, explicitCorrect) {
   const q = state.quizQuestions[state.quizIndex];
   if (state.answers[q.id]) return;
-
-  let isCorrect = false;
-  if (q.type === 'binary') {
-    isCorrect = (selectedText === q.correctAnswer);
-  } else {
-    if (explicitCorrect !== undefined) {
-      isCorrect = explicitCorrect;
-    } else {
-      const opt = (q.options || []).find(o => o.text === selectedText);
-      isCorrect = !!opt?.isCorrect;
-    }
-  }
-
-  const durationSec = Math.max(1, Math.round((Date.now() - state.questionStartTime) / 1000));
-  const ecMap = getErrorCounts();
-  const ccMap = getCorrectCounts();
-  const eb = getErrorBook();
-
-  if (isCorrect) {
-    ccMap[q.id] = (ccMap[q.id] || 0) + 1;
-    saveCorrectCounts(ccMap);
-  } else {
-    ecMap[q.id] = (ecMap[q.id] || 0) + 1;
-    saveErrorCounts(ecMap);
-    if (!eb.includes(q.id)) {
-      saveErrorBook([...eb, q.id]);
-    }
-  }
-
-  state.answers[q.id] = {
-    result: isCorrect ? 'ok' : 'bad',
-    selected: selectedText,
-    revealed: true,
-    timeSeconds: durationSec
-  };
-
-  appendFullHistory({
-    time: new Date().toISOString(),
-    qId: q.id,
-    type: q.type,
-    unitId: q.unitId,
-    school: q.school,
-    selected: selectedText,
-    isCorrect,
-    durationSec
-  });
-
-  pushSlimLogToCloud(q, isCorrect, selectedText, durationSec);
-
+  const isCorrect = evaluateSingleChoice(q, selectedText, explicitCorrect);
+  recordQuestionOutcome(q, isCorrect, selectedText);
   render();
 }
 
 function submitMultiAnswer() {
   const q = state.quizQuestions[state.quizIndex];
   if (state.answers[q.id]) return;
-
   const userSelections = Array.from(state.multiSelections[q.id] || []);
   if (userSelections.length === 0) {
     showToast('請至少勾選一個選項後再送出！');
     return;
   }
-
   const correctOpts = (q.options || []).filter(o => o.isCorrect).map(o => o.text);
-  
-  // 判定是否全對 (應選全選，且未多選錯項)
-  const isAllCorrect = (userSelections.length === correctOpts.length) &&
-                       userSelections.every(text => correctOpts.includes(text));
+  const isAllCorrect = (userSelections.length === correctOpts.length) && userSelections.every(t => correctOpts.includes(t));
+  recordQuestionOutcome(q, isAllCorrect, userSelections);
+  render();
+}
 
-  const durationSec = Math.max(1, Math.round((Date.now() - state.questionStartTime) / 1000));
-  const ecMap = getErrorCounts();
-  const ccMap = getCorrectCounts();
-  const eb = getErrorBook();
+function finalizeGroupIfComplete(q) {
+  const subs = q.subQuestions || [];
+  const subMap = state.subAnswers[q.id] || {};
+  if (subs.length === 0 || state.answers[q.id]) return;
+  if (!subs.every(s => !!subMap[s.subId])) return;
 
-  if (isAllCorrect) {
-    ccMap[q.id] = (ccMap[q.id] || 0) + 1;
-    saveCorrectCounts(ccMap);
-  } else {
-    ecMap[q.id] = (ecMap[q.id] || 0) + 1;
-    saveErrorCounts(ecMap);
-    if (!eb.includes(q.id)) {
-      saveErrorBook([...eb, q.id]);
-    }
+  const allOk = subs.every(s => subMap[s.subId].result === 'ok');
+  const summarySel = subs.map(s => `${s.label || s.subId}:${subMap[s.subId].result === 'ok' ? '○' : '✕'}`).join(' ');
+  recordQuestionOutcome(q, allOk, summarySel, '🏆 本組小題全部答對！', '🔥 本組有答錯小題，已納入錯題本');
+}
+
+function submitSubAnswer(subId, selectedText, explicitCorrect) {
+  const q = state.quizQuestions[state.quizIndex];
+  if (!q || q.type !== 'group') return;
+  const sub = (q.subQuestions || []).find(s => s.subId === subId);
+  if (!sub) return;
+  if (!state.subAnswers[q.id]) state.subAnswers[q.id] = {};
+  if (state.subAnswers[q.id][subId]) return;
+
+  const isCorrect = evaluateSingleChoice(sub, selectedText, explicitCorrect);
+  state.subAnswers[q.id][subId] = { result: isCorrect ? 'ok' : 'bad', selected: selectedText, revealed: true };
+  finalizeGroupIfComplete(q);
+  render();
+}
+
+function submitSubMultiAnswer(subId) {
+  const q = state.quizQuestions[state.quizIndex];
+  if (!q || q.type !== 'group') return;
+  const sub = (q.subQuestions || []).find(s => s.subId === subId);
+  if (!sub) return;
+  if (!state.subAnswers[q.id]) state.subAnswers[q.id] = {};
+  if (state.subAnswers[q.id][subId]) return;
+
+  const userSelections = Array.from(state.subMultiSelections[q.id]?.[subId] || []);
+  if (userSelections.length === 0) {
+    showToast('請至少勾選一個選項後再送出！');
+    return;
   }
+  const correctOpts = (sub.options || []).filter(o => o.isCorrect).map(o => o.text);
+  const isAllCorrect = (userSelections.length === correctOpts.length) && userSelections.every(t => correctOpts.includes(t));
+  state.subAnswers[q.id][subId] = { result: isAllCorrect ? 'ok' : 'bad', selected: userSelections, revealed: true };
+  finalizeGroupIfComplete(q);
+  render();
+}
 
-  state.answers[q.id] = {
-    result: isAllCorrect ? 'ok' : 'bad',
-    selected: userSelections,
-    revealed: true,
-    timeSeconds: durationSec
+function submitSubSelfEvalAnswer(subId, isCorrect) {
+  const q = state.quizQuestions[state.quizIndex];
+  if (!q || q.type !== 'group') return;
+  if (!state.subAnswers[q.id]) state.subAnswers[q.id] = {};
+  if (state.subAnswers[q.id][subId]) return;
+
+  state.subAnswers[q.id][subId] = {
+    result: isCorrect ? 'ok' : 'bad',
+    selected: isCorrect ? '紙筆自評：全對' : '紙筆自評：有錯',
+    revealed: true
   };
-
-  appendFullHistory({
-    time: new Date().toISOString(),
-    qId: q.id,
-    type: q.type,
-    unitId: q.unitId,
-    school: q.school,
-    selected: userSelections,
-    isCorrect: isAllCorrect,
-    durationSec
-  });
-
-  pushSlimLogToCloud(q, isAllCorrect, userSelections, durationSec);
-
+  finalizeGroupIfComplete(q);
   render();
 }
 
@@ -1947,7 +2246,7 @@ function renderErrorBookView() {
   if (state.errorFilterSchool !== 'ALL') {
     errorQuestions = errorQuestions.filter(q => q.schoolKey === state.errorFilterSchool);
   }
-  const schools = getActiveSchools();
+  const schools = getMergedErrorSchools();
 
   return `
     <div class="view error-book-view">
@@ -1966,10 +2265,11 @@ function renderErrorBookView() {
 
       <!-- 學校快速過濾 -->
       <div class="exam-school-tabs-wrap" style="margin-bottom: 20px;">
-        <div class="exam-tabs-header">🏫 依學校篩選錯題：</div>
+        <div class="exam-tabs-header">🏫 依範圍／學校篩選錯題：</div>
         <div class="exam-school-tabs">
           ${schools.map(s => {
             const cnt = s.id === 'ALL' ? allQs.filter(q => eb.includes(q.id)).length : allQs.filter(q => eb.includes(q.id) && q.schoolKey === s.id).length;
+            if (s.id !== 'ALL' && cnt === 0) return '';
             return `
               <button type="button" class="school-tab-btn ${state.errorFilterSchool === s.id ? 'active' : ''}" data-error-school="${s.id}">
                 <span>${s.shortName}</span>
@@ -1992,23 +2292,29 @@ function renderErrorBookView() {
           ${errorQuestions.map((q, idx) => {
             const ec = getErrorCounts()[q.id] || 0;
             const cc = getCorrectCounts()[q.id] || 0;
-            const tLabel = q.type === 'binary' ? '是非' : q.type === 'multi' ? '複選' : q.type === 'self_eval' ? '紙筆大題' : '選擇';
+            const tLabel = q.type === 'group' ? '題組' : q.type === 'binary' ? '是非' : q.type === 'multi' ? '複選' : q.type === 'self_eval' ? '紙筆大題' : '選擇';
+            const ebImg = q.stemImage || q.image;
+            const ebAns = q.type === 'group'
+              ? (q.subQuestions || []).map(s => `${s.label || ''} ${s.correctAnswer || ''}`).join(' ｜ ')
+              : (q.correctAnswer || '');
+            const ebCore = q.explanation?.examPurpose || q.coreConcept || '';
+            const ebInsight = q.explanation?.insight || q.misconception || '';
             return `
               <article class="q-card" style="margin-bottom: 0;">
                 <div class="q-top-action-bar">
                   <div class="q-tags">
                     <span class="tag type">${tLabel}</span>
-                    <span class="tag school">${q.school}</span>
+                    <span class="tag school">${escapeHtml(q.school || '精選題庫')}</span>
                     <span class="tag" style="background:#fee2e2; color:#b91c1c;">錯 ${ec} 次 · 對 ${cc} 次</span>
                   </div>
                   <button class="btn btn-ghost btn-sm btn-remove-error" data-qid="${q.id}">✓ 標記已熟練移出</button>
                 </div>
                 ${q.passage ? `<div class="reading-passage" style="margin-bottom:8px;"><div class="passage-content">${escapeHtml(q.passage)}</div></div>` : ''}
                 <div class="q-text" style="font-size: 16px; margin-bottom: 12px;">${idx + 1}. ${escapeHtml(q.question)}</div>
-                ${q.image ? `<div class="diagram-box" style="margin: 8px 0;"><img src="${q.image}" class="diagram-img" style="max-height: 180px;"></div>` : ''}
+                ${ebImg ? `<div class="diagram-box" style="margin: 8px 0;"><img src="${ebImg}" class="diagram-img" style="max-height: 180px;"></div>` : ''}
                 <div class="dual-explanation" style="margin-top: 10px; padding: 10px;">
-                  <div class="exp-core"><p><b>正解：</b>${escapeHtml(q.correctAnswer)} — ${escapeHtml(q.coreConcept || '')}</p></div>
-                  ${q.misconception ? `<div class="exp-trap"><p><b>陷阱剖析：</b>${escapeHtml(q.misconception)}</p></div>` : ''}
+                  <div class="exp-core"><p><b>正解：</b>${escapeHtml(ebAns)}${ebCore ? ' — ' + escapeHtml(ebCore) : ''}</p></div>
+                  ${ebInsight ? `<div class="exp-trap"><p><b>解析／陷阱：</b>${escapeHtml(ebInsight)}</p></div>` : ''}
                 </div>
               </article>
             `;
@@ -2027,7 +2333,7 @@ function bindErrorBookEvents() {
     if (state.errorFilterSchool !== 'ALL') {
       qs = qs.filter(q => q.schoolKey === state.errorFilterSchool);
     }
-    startQuizSession('錯題專項複習', '徹底搞懂每個失誤點', qs, 'error_book', 'EXAM_MID1');
+    startQuizSession('錯題專項複習', '徹底搞懂每個失誤點', qs, 'error_book', 'ALL');
   });
 
   document.querySelectorAll('[data-error-school]').forEach(btn => {
@@ -2049,37 +2355,114 @@ function bindErrorBookEvents() {
 }
 
 // ============================================================================
-// 7. A4 考卷列印 (Print View)
+// 7. A4 考卷列印 (Print View) — 支援單元/段考/題組/題幹切圖/解答卷模式
 // ============================================================================
-function renderPrintView() {
-  const allQs = getActiveQuestionBank();
-  let sample = allQs;
-  if (state.currentUnitId === 'EXAM_MID1' && state.examSchool !== 'ALL') {
-    sample = allQs.filter(q => q.schoolKey === state.examSchool);
-  }
-  sample = sample.slice(0, 25);
+function renderPrintItemHtml(item, labelPrefix, includeAnswers) {
+  const inlineImg = item.stemImage || item.image;
+  const tTag = item.type === 'binary' ? '是非題' : item.type === 'multi' ? '複選題' : item.type === 'match' ? '配合題' : item.type === 'self_eval' ? '簡答/紙筆題' : '選擇題';
+  let bodyHtml = '';
 
-  const sObj = getActiveSchools().find(s => s.id === state.examSchool);
-  const schoolLabel = state.examSchool === 'ALL' ? '全臺名校段考精華卷' : (sObj ? sObj.name : '段考評量試卷');
+  if ((item.type === 'mcq' || item.type === 'match') && item.options) {
+    bodyHtml = `
+      <div class="print-opt-grid">
+        ${item.options.map((opt, oIdx) => `<span>${opt.key || '①②③④⑤⑥'[oIdx] || (oIdx + 1)}. ${escapeHtml(opt.text)}</span>`).join('')}
+      </div>
+    `;
+  } else if (item.type === 'multi' && item.options) {
+    bodyHtml = `
+      <div class="print-opt-grid">
+        ${item.options.map(opt => `<span>□ ${escapeHtml(opt.text)}</span>`).join('')}
+      </div>
+    `;
+  } else if (item.type === 'binary') {
+    bodyHtml = `<span class="print-tf-blank">( &nbsp;&nbsp;&nbsp;&nbsp; )</span>`;
+  } else if (item.type === 'self_eval') {
+    bodyHtml = `<div class="print-answer-lines"></div>`;
+  }
+
+  let ansHtml = '';
+  if (includeAnswers) {
+    const ansText = item.type === 'multi'
+      ? (item.options || []).filter(o => o.isCorrect).map(o => o.text).join('、')
+      : (item.correctAnswer || '');
+    const noteText = item.explanation?.insight || item.explanation?.examPurpose || item.coreConcept || '';
+    const diffText = item.correctionDiff ? `（訂正：${item.correctionDiff.wrongSpan} ➔ ${item.correctionDiff.rightSpan}）` : '';
+    ansHtml = `
+      <div class="print-ans-note">
+        <b>【解答】${escapeHtml(ansText)}${escapeHtml(diffText)}</b>
+        ${noteText ? `<span> — ${escapeHtml(noteText)}</span>` : ''}
+      </div>
+    `;
+  }
+
+  return `
+    <div class="print-q-item">
+      <div class="print-q-stem"><b>${escapeHtml(labelPrefix)} [${tTag}]</b> ${escapeHtml(item.question)} ${item.type === 'binary' ? bodyHtml : ''}</div>
+      ${inlineImg ? `<div class="print-q-img"><img src="${inlineImg}" alt="試題附圖"></div>` : ''}
+      ${item.type !== 'binary' ? bodyHtml : ''}
+      ${ansHtml}
+    </div>
+  `;
+}
+
+function renderPrintView() {
+  const lessons = getActiveLessons();
+  const unitId = state.printConfig.unitId || (isExamUnitId(state.currentUnitId) ? state.currentUnitId : (lessons[0]?.id || 'U1'));
+  const isExam = isExamUnitId(unitId);
+  const schools = isExam ? getActiveSchools(unitId) : [];
+  const schoolKey = isExam ? (state.printConfig.school || getExamSchool(unitId) || 'ALL') : 'ALL';
+  const countLim = state.printConfig.count || 25;
+  const includeAns = !!state.printConfig.includeAnswers;
+
+  let pool = unitId === 'ALL' ? getActiveQuestionBank() : getFilteredQuestions(unitId, schoolKey);
+  if (countLim !== 'ALL' && Number(countLim) > 0) {
+    pool = pool.slice(0, Number(countLim));
+  }
+
+  const uObj = lessons.find(u => u.id === unitId);
+  const sObj = isExam ? schools.find(s => s.id === schoolKey) : null;
+  const sourceLabel = unitId === 'ALL'
+    ? '全冊精選混合卷'
+    : isExam
+      ? `${uObj?.title || unitId}（${sObj ? sObj.shortName : '全部學校'}）`
+      : (uObj?.title || unitId);
   const subjHeading = isSocial() ? '國小六年級上學期 社會科評量試卷' : '國小六年級上學期 自然科學評量試卷';
 
   return `
     <div class="view print-view">
-      <div class="no-print section-title">
+      <div class="no-print section-title" style="flex-wrap:wrap; gap:12px;">
         <div>
           <h2>🖨️ A4 實體考卷生成與列印</h2>
-          <span class="muted">適合紙筆模擬段考與考前限時測驗</span>
+          <span class="muted">支援題組、原卷插圖直印與「學生空白卷／附解答卷」切換</span>
         </div>
-        <div style="display:flex; gap:8px;">
+        <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+          <select id="print-unit-select" class="exam-school-select" style="width:auto; min-width:190px;">
+            <option value="ALL" ${unitId === 'ALL' ? 'selected' : ''}>全冊綜合 (${getActiveQuestionBank().length} 題)</option>
+            ${lessons.map(u => `<option value="${u.id}" ${unitId === u.id ? 'selected' : ''}>${escapeHtml(u.title)}</option>`).join('')}
+          </select>
+          ${isExam && schools.length > 0 ? `
+            <select id="print-school-select" class="exam-school-select" style="width:auto; min-width:150px;">
+              ${schools.map(s => `<option value="${s.id}" ${schoolKey === s.id ? 'selected' : ''}>${escapeHtml(s.shortName)}</option>`).join('')}
+            </select>
+          ` : ''}
+          <select id="print-count-select" class="exam-school-select" style="width:auto; min-width:100px;">
+            <option value="25" ${String(countLim) === '25' ? 'selected' : ''}>前 25 題</option>
+            <option value="50" ${String(countLim) === '50' ? 'selected' : ''}>前 50 題</option>
+            <option value="ALL" ${String(countLim) === 'ALL' ? 'selected' : ''}>全部印出</option>
+          </select>
+          <label class="print-ans-toggle">
+            <input type="checkbox" id="print-include-ans" ${includeAns ? 'checked' : ''}>
+            <span>附解答詳解</span>
+          </label>
           <button class="btn btn-primary" onclick="window.print()">🖨️ 立即列印</button>
           <button class="btn btn-ghost" onclick="setView('dashboard')">返回</button>
         </div>
       </div>
 
-      <div class="print-page glass" style="background:#fff; color:#000; padding: 30px; border-radius: 8px;">
+      <div class="print-page glass" style="background:#fff; color:#000; padding: 28px; border-radius: 8px;">
         <div class="print-header" style="text-align:center; border-bottom: 2px solid #000; padding-bottom: 12px; margin-bottom: 20px;">
-          <h2 style="font-size: 19pt; margin-bottom: 4px;">${subjHeading}</h2>
-          <p style="margin: 0; font-size: 11pt;">試卷來源：${schoolLabel} ｜ 得分：__________</p>
+          <h2 style="font-size: 19pt; margin-bottom: 4px;">${subjHeading}${includeAns ? '（詳解教師版）' : ''}</h2>
+          <p style="margin: 0; font-size: 11pt;">範圍：${escapeHtml(sourceLabel)}（共 ${pool.length} 題） ｜ 得分：__________</p>
           <div style="display: flex; justify-content: space-around; margin-top: 10px; font-size: 11pt;">
             <span>六年 _____ 班</span>
             <span>座號：_____ 號</span>
@@ -2088,24 +2471,47 @@ function renderPrintView() {
         </div>
 
         <div class="print-questions-flow">
-          ${sample.map((q, idx) => `
-            <div class="print-q-item" style="margin-bottom: 16px; font-size: 11pt; line-height: 1.6; white-space: pre-line;">
-              <b>(${idx + 1}) [${q.type === 'binary' ? '是非題' : q.type === 'self_eval' ? '紙筆綜合題' : '選擇題'}]</b> ${escapeHtml(q.question)}
-              ${q.type === 'mcq' && q.options ? `
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; margin-left: 20px; margin-top: 4px;">
-                  ${q.options.map((opt, oIdx) => `<span>①②③④`[oIdx] + ` ${escapeHtml(opt.text)}</span>`).join('')}
+          ${pool.map((q, idx) => {
+            if (q.type === 'group') {
+              const gImg = q.stemImage || q.image;
+              return `
+                <div class="print-q-item print-group-box">
+                  <div class="print-q-stem"><b>(${idx + 1}) [題組]</b> ${escapeHtml(q.question)}</div>
+                  ${q.passage ? `<div class="print-passage">${escapeHtml(q.passage)}</div>` : ''}
+                  ${gImg ? `<div class="print-q-img"><img src="${gImg}" alt="題組附圖"></div>` : ''}
+                  <div class="print-subq-list">
+                    ${(q.subQuestions || []).map((sub, sIdx) => renderPrintItemHtml(sub, sub.label || `(${sIdx + 1})`, includeAns)).join('')}
+                  </div>
                 </div>
-              ` : q.type === 'binary' ? `
-                <span style="float: right; margin-right: 20px;">( &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; )</span>
-              ` : ''}
-            </div>
-          `).join('')}
+              `;
+            }
+            return renderPrintItemHtml(q, `(${idx + 1})`, includeAns);
+          }).join('')}
         </div>
       </div>
     </div>
   `;
 }
-function bindPrintEvents() {}
+
+function bindPrintEvents() {
+  document.getElementById('print-unit-select')?.addEventListener('change', (e) => {
+    state.printConfig.unitId = e.target.value;
+    state.printConfig.school = 'ALL';
+    render();
+  });
+  document.getElementById('print-school-select')?.addEventListener('change', (e) => {
+    state.printConfig.school = e.target.value;
+    render();
+  });
+  document.getElementById('print-count-select')?.addEventListener('change', (e) => {
+    state.printConfig.count = e.target.value;
+    render();
+  });
+  document.getElementById('print-include-ans')?.addEventListener('change', (e) => {
+    state.printConfig.includeAnswers = e.target.checked;
+    render();
+  });
+}
 
 // ============================================================================
 // 8. AI Slim 日誌匯出中心 (AI Export)
@@ -2342,30 +2748,44 @@ function formatReviewMarkdown(md) {
 
 function renderReviewView() {
   const reviews = getActiveReviews();
+  const lessons = getActiveLessons();
+  const iconMap = {
+    U1: isSocial() ? '🏛️' : '🌦️',
+    U2: isSocial() ? '🌏' : '🧪',
+    EXAM_MID1: '🏆',
+    U3: isSocial() ? '🏭' : '🐾',
+    U4: isSocial() ? '🌿' : '🧲',
+    U5: '🚀',
+    EXAM_MID2: '🎓'
+  };
+
+  const tabUnits = lessons
+    .filter(u => !!reviews[u.id])
+    .map(u => {
+      const r = reviews[u.id];
+      return {
+        id: u.id,
+        title: r.unitTitle || r.title || u.title,
+        icon: iconMap[u.id] || (u.isExam ? '🏆' : '📘')
+      };
+    });
+
   let curUnitId = state.currentReviewUnitId || 'U1';
   if (!reviews[curUnitId]) {
-    curUnitId = 'U1';
-    state.currentReviewUnitId = 'U1';
+    curUnitId = tabUnits[0]?.id || 'U1';
+    state.currentReviewUnitId = curUnitId;
   }
-  const curUnit = reviews[curUnitId];
-
-  // 單元 Tabs
-  const tabUnits = isSocial() ? [
-    { id: 'U1', title: '第一單元：現代社會與民主政治', icon: '🏛️' },
-    { id: 'U2', title: '第二單元：社會變遷與多元文化', icon: '🌏' },
-    { id: 'EXAM_MID1', title: '第一次段考：7校社會衝刺錦囊', icon: '🏆' }
-  ] : [
-    { id: 'U1', title: '第一單元：天氣的變化', icon: '🌦️' },
-    { id: 'U2', title: '第二單元：水溶液的奧祕', icon: '🧪' },
-    { id: 'EXAM_MID1', title: '第一次段考：9校衝刺錦囊', icon: '🏆' }
-  ];
+  const curUnit = reviews[curUnitId] || { unitTitle: curUnitId, unitSubtitle: '', sections: [] };
+  const curTitle = curUnit.unitTitle || curUnit.title || curUnitId;
+  const curSub = curUnit.unitSubtitle || curUnit.summary || '';
+  const curNotice = curUnit.coverageNotice || curUnit.examTarget || '本章節彙整課本重點、名校圖表與易錯陷阱，讀完保證段考真題輕鬆掌握！';
 
   const tabsHtml = tabUnits.map(t => {
     const isActive = t.id === curUnitId;
     return `
       <button type="button" class="review-tab-btn ${isActive ? 'active' : ''}" data-switch-review-tab="${t.id}">
         <span>${t.icon}</span>
-        <span>${t.title}</span>
+        <span>${escapeHtml(t.title)}</span>
       </button>
     `;
   }).join('');
@@ -2406,8 +2826,8 @@ function renderReviewView() {
       <header class="review-hero">
         <div class="review-hero-title-row">
           <div>
-            <h2>${escapeHtml(curUnit.unitTitle)}</h2>
-            <p>${escapeHtml(curUnit.unitSubtitle)}</p>
+            <h2>${escapeHtml(curTitle)}</h2>
+            <p>${escapeHtml(curSub)}</p>
           </div>
           <div class="review-hero-actions">
             <button type="button" class="btn btn-primary" id="btn-review-start-quiz">
@@ -2425,8 +2845,8 @@ function renderReviewView() {
         <div class="review-coverage-badge">
           <span style="font-size: 20px;">🛡️</span>
           <div>
-            <b>${isSocial() ? '108課綱 康軒六上社會完整核心概念 ＋ 7校考點 100% 覆蓋承諾' : '108課綱 康軒六上完整核心概念 ＋ 9校考點 100% 覆蓋承諾'}</b>
-            <span>${escapeHtml(curUnit.coverageNotice || '本章節彙整課本重點、名校圖表與易錯陷阱，讀完保證各校段考真題輕鬆拿滿分！')}</span>
+            <b>${isSocial() ? '108課綱 康軒六上社會完整核心概念 ＋ 全國名校考點 100% 覆蓋承諾' : '108課綱 康軒六上自然完整核心概念 ＋ 全國名校考點 100% 覆蓋承諾'}</b>
+            <span>${escapeHtml(curNotice)}</span>
           </div>
         </div>
       </header>
@@ -2467,6 +2887,7 @@ function renderReviewView() {
 function bindReviewEvents() {
   const curUnitId = state.currentReviewUnitId || 'U1';
   const curUnit = getActiveReviews()[curUnitId] || {};
+  const curTitle = curUnit.unitTitle || curUnit.title || '重點特訓';
 
   // 單元 Tabs 切換
   document.querySelectorAll('[data-switch-review-tab]').forEach(btn => {
@@ -2485,7 +2906,7 @@ function bindReviewEvents() {
       showToast('此單元題庫準備中');
       return;
     }
-    startQuizSession(`${curUnit.unitTitle || '重點特訓'} 實戰測驗`, '複習後立即檢驗學習成效', qs, 'unit', curUnitId);
+    startQuizSession(`${curTitle} 實戰測驗`, '複習後立即檢驗學習成效', qs, 'unit', curUnitId);
   };
   document.getElementById('btn-review-start-quiz')?.addEventListener('click', handleStartQuiz);
   document.getElementById('btn-review-bottom-start-quiz')?.addEventListener('click', handleStartQuiz);
