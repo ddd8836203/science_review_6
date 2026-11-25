@@ -185,6 +185,12 @@ function getCurrentUserObj() {
   return USERS.find(u => u.id === state.currentUser) || USERS[0];
 }
 
+function isQuestionMastered(qId, ccMap, ecMap) {
+  const corr = (ccMap && ccMap[qId]) || 0;
+  const err = (ecMap && ecMap[qId]) || 0;
+  return corr > 0 && (err - corr) <= 0;
+}
+
 function getUserStatsSummary(uid) {
   const eb = getErrorBook(uid);
   const ec = getErrorCounts(uid);
@@ -192,12 +198,10 @@ function getUserStatsSummary(uid) {
   const history = getFullHistory(uid);
   const bank = getActiveQuestionBank();
   const totalInBank = bank.length || 1;
-  
+
   let masteredCount = 0;
   bank.forEach(q => {
-    const net = (ec[q.id] || 0) - (cc[q.id] || 0);
-    const corr = cc[q.id] || 0;
-    if (corr > 0 && net <= 0) masteredCount++;
+    if (isQuestionMastered(q.id, cc, ec)) masteredCount++;
   });
   const pct = totalInBank > 0 ? Math.round((masteredCount / totalInBank) * 100) : 0;
   return {
@@ -677,7 +681,7 @@ function getUnitStats(unitId, schoolKey = null) {
   const ecMap = getErrorCounts();
   
   const errCount = pool.filter(q => eb.includes(q.id)).length;
-  const mastered = pool.filter(q => (ccMap[q.id] || 0) >= 2 && !(ecMap[q.id] > 0)).length;
+  const mastered = pool.filter(q => isQuestionMastered(q.id, ccMap, ecMap)).length;
   const pct = pool.length > 0 ? Math.round((mastered / pool.length) * 100) : 0;
   return { total: pool.length, errCount, mastered, pct };
 }
@@ -687,7 +691,7 @@ function getGlobalStats() {
   const eb = getErrorBook();
   const ccMap = getCorrectCounts();
   const ecMap = getErrorCounts();
-  const mastered = bank.filter(q => (ccMap[q.id] || 0) >= 2 && !(ecMap[q.id] > 0)).length;
+  const mastered = bank.filter(q => isQuestionMastered(q.id, ccMap, ecMap)).length;
   const pct = bank.length > 0 ? Math.round((mastered / bank.length) * 100) : 0;
   return { total: bank.length, mastered, pct, errors: eb.length };
 }
@@ -3048,7 +3052,25 @@ window.addEventListener('keydown', (e) => {
   }
 
   // 左右換題快捷鍵
-  if (e.key === 'ArrowRight' || e.key === ' ') {
+  if (e.key === ' ') {
+    const lightboxOpen = !!document.getElementById('lightbox')?.classList.contains('show');
+    const dropdownEl = document.getElementById('user-dropdown-menu');
+    const dropdownOpen = !!(dropdownEl && dropdownEl.style.display !== 'none');
+    const interactiveEl = (el) => {
+      if (!el || el.nodeType !== 1) return false;
+      if (el.isContentEditable) return true;
+      return !!el.closest('button, a, summary, input, textarea, select, [role="button"]');
+    };
+    if (lightboxOpen || dropdownOpen || interactiveEl(e.target) || interactiveEl(document.activeElement)) {
+      return;
+    }
+    e.preventDefault();
+    if (state.quizIndex < qs.length - 1) {
+      state.quizIndex++;
+      state.questionStartTime = Date.now();
+      render();
+    }
+  } else if (e.key === 'ArrowRight') {
     if (state.quizIndex < qs.length - 1) {
       state.quizIndex++;
       state.questionStartTime = Date.now();
