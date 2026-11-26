@@ -489,34 +489,83 @@ async function syncFromCloud(uid = state.currentUser, notify = false) {
   updateSyncStatusUI();
 }
 
-// 逐題做題流水帳（直推雲端，只寫不讀，供日後 AI 分析診斷）
-async function pushSlimLogToCloud(q, isCorrect, studentAnswer, durationSec) {
-  const nowStr = new Date().toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false });
+function resolveQuestionExportInfo(q) {
   let optsStr = '';
+  let correctStr = '';
   if ((q.type === 'mcq' || q.type === 'match') && Array.isArray(q.options)) {
-    optsStr = q.options.map((o, idx) => `[${idx+1}] ${o.text}${o.isCorrect ? '*' : ''}`).join(' | ');
+    optsStr = q.options.map((o, idx) => `[${idx + 1}] ${o.text}${o.isCorrect ? '*' : ''}`).join(' | ');
+    correctStr = q.correctAnswer || q.options.find(o => o.isCorrect)?.text || '';
   } else if (q.type === 'binary') {
     optsStr = `正解: ${q.correctAnswer}`;
+    correctStr = q.correctAnswer || '';
   } else if (q.type === 'self_eval') {
     optsStr = `紙筆自評大題｜標準答案: ${q.correctAnswer}`;
+    correctStr = q.correctAnswer || '';
   } else if (q.type === 'group') {
-    optsStr = `綜合題組(${(q.subQuestions || []).length}小題)`;
+    const subs = Array.isArray(q.subQuestions) ? q.subQuestions : [];
+    optsStr = `綜合題組(${subs.length}小題)`;
+    correctStr = subs.map((s, idx) => {
+      const lbl = s.label || `(${idx + 1})`;
+      const sCorr = s.correctAnswer || (Array.isArray(s.options) ? s.options.filter(o => o.isCorrect).map(o => o.text).join('、') : '');
+      return `${lbl} ${sCorr}`;
+    }).join(' ｜ ');
+  } else if (q.type === 'multi' && Array.isArray(q.options)) {
+    optsStr = q.options.map((o, idx) => `[${idx + 1}] ${o.text}${o.isCorrect ? '*' : ''}`).join(' | ');
+    correctStr = q.correctAnswer || q.options.filter(o => o.isCorrect).map(o => o.text).join('、') || '';
   } else {
-    optsStr = `多選複選題`;
+    optsStr = '多選複選題';
+    correctStr = q.correctAnswer || (Array.isArray(q.options) ? q.options.filter(o => o.isCorrect).map(o => o.text).join('、') : '');
   }
+  const trap = q.misconception || (Array.isArray(q.subQuestions) ? q.subQuestions.map(s => s.misconception).filter(Boolean).join('；') : '');
+  const concept = q.coreConcept || (Array.isArray(q.subQuestions) ? q.subQuestions.map(s => s.coreConcept).filter(Boolean).join('；') : '');
+  return { optsStr, correctStr, trap, concept };
+}
 
-  const entry = {
-    t: nowStr,
-    subj: state.subject,
-    id: q.id,
-    sch: q.school || '',
-    domain: q.domain || '',
-    q: q.question,
-    opts: optsStr,
-    ans: Array.isArray(studentAnswer) ? studentAnswer.join('、') : String(studentAnswer),
-    res: isCorrect ? 'ok' : 'bad',
-    sec: durationSec || 1
-  };
+// 逐題做題流水帳（直推雲端，只寫不讀，供日後 AI 分析診斷）
+async function pushSlimLogToCloud(q, isCorrect, studentAnswer, durationSec) {
+  const nowMs = Date.now();
+  const { optsStr, correctStr } = resolveQuestionExportInfo(q);
+  const ansStr = Array.isArray(studentAnswer) ? studentAnswer.join('、') : String(studentAnswer);
+  const resCode = isCorrect ? 'ok' : 'bad';
+  const secVal = durationSec || 1;
+
+  const entry = window.AIExportCore?.createSlimLogEntry
+    ? window.AIExportCore.createSlimLogEntry({
+        ts: nowMs,
+        subj: state.subject,
+        id: q.id,
+        unit: q.unitId || '',
+        cat: q.type || '',
+        sch: q.school || '',
+        q: q.question,
+        opts: optsStr,
+        correct: correctStr,
+        ans: ansStr,
+        res: resCode,
+        sec: secVal,
+        trap: q.misconception || '',
+        concept: q.coreConcept || '',
+        extra: { domain: q.domain || '' }
+      })
+    : {
+        v: 2,
+        ts: nowMs,
+        t: new Date(nowMs).toLocaleString('zh-TW', { timeZone: 'Asia/Taipei', hour12: false }),
+        subj: state.subject,
+        id: q.id,
+        unit: q.unitId || '',
+        cat: q.type || '',
+        sch: q.school || '',
+        domain: q.domain || '',
+        q: q.question,
+        opts: optsStr,
+        correct: correctStr,
+        ans: ansStr,
+        res: resCode,
+        sec: secVal,
+        trap: q.misconception || '',
+        concept: q.coreConcept || ''
+      };
 
   try {
     const raw = localStorage.getItem(getUserKey('recent_answer_logs')) || '[]';
@@ -529,7 +578,7 @@ async function pushSlimLogToCloud(q, isCorrect, studentAnswer, durationSec) {
   if (!state.cloudDbUrl) return;
   const base = state.cloudDbUrl.replace(/\/+$/, '');
   const uid = state.currentUser;
-  const logKey = `${Date.now()}_${q.id}`;
+  const logKey = `${nowMs}_${q.id}`;
   try {
     await fetch(`${base}/${getCloudLogsNode()}/${uid}/${logKey}.json`, {
       method: 'PUT',
@@ -2524,68 +2573,85 @@ function bindPrintEvents() {
 // ============================================================================
 // 8. AI Slim 日誌匯出中心 (AI Export)
 // ============================================================================
-function renderExportView() {
-  const history = getFullHistory();
-  const errorBook = getErrorBook();
+function buildExportQuestionsMap() {
   const allQs = getActiveQuestionBank();
+  const map = {};
+  allQs.forEach(q => {
+    if (!q || !q.id) return;
+    const { optsStr, correctStr, trap, concept } = resolveQuestionExportInfo(q);
+    let qText = q.question || '';
+    let optsOut = optsStr;
+    if (q.type === 'group' && Array.isArray(q.subQuestions) && q.subQuestions.length > 0) {
+      const subLines = q.subQuestions.map((s, idx) => {
+        const lbl = s.label || `(${idx + 1})`;
+        const sCorr = s.correctAnswer || (Array.isArray(s.options) ? s.options.filter(o => o.isCorrect).map(o => o.text).join('、') : '');
+        const sOpts = Array.isArray(s.options) ? s.options.map((o, i) => `[${i + 1}] ${o.text}${o.isCorrect ? '*' : ''}`).join(' | ') : '';
+        return `${lbl} ${s.question || ''}${sOpts ? ` [${sOpts}]` : ''}（正解：${sCorr}）`;
+      });
+      qText = `${qText}\n[題組子題]\n${subLines.join('\n')}`;
+      optsOut = `${optsStr}：${subLines.join(' ； ')}`;
+    }
+    map[q.id] = {
+      unit: q.unitId || '',
+      cat: q.type || '',
+      sch: q.school || '',
+      q: qText,
+      opts: optsOut,
+      correct: correctStr,
+      trap,
+      concept,
+      qType: q.type || ''
+    };
+  });
+  return map;
+}
 
-  const exportData = {
-    exportVersion: '2.1',
-    subject: state.subject,
-    exportTime: new Date().toISOString(),
-    user: getCurrentUserObj(),
-    summary: {
-      totalQuestions: allQs.length,
-      historyLogCount: history.length,
-      currentErrorBookCount: errorBook.length
-    },
-    errorBookDetails: errorBook.map(id => {
-      const q = allQs.find(item => item.id === id);
-      return q ? {
-        id: q.id,
-        type: q.type,
-        school: q.school,
-        question: q.question,
-        correctAnswer: q.correctAnswer,
-        coreConcept: q.coreConcept,
-        misconception: q.misconception
-      } : { id };
-    }),
-    recentLogs: history.slice(-50)
-  };
-
-  const jsonStr = JSON.stringify(exportData, null, 2);
-
-  return `
-    <div class="view export-view" style="max-width: 800px; margin: 0 auto;">
-      <div class="section-title">
-        <div>
-          <h2>📤 匯出${isSocial() ? '社會科' : '自然科'}學習日誌給 AI</h2>
-          <span class="muted">複製此 JSON 貼給 AI 診斷弱點或量身訂做考題</span>
+function renderExportView() {
+  if (!window.AIExportCore || typeof window.AIExportCore.mountExportCenter !== 'function') {
+    return `
+      <div class="view export-view" style="max-width: 800px; margin: 0 auto;">
+        <div class="section-title">
+          <div>
+            <h2>📤 匯出${isSocial() ? '社會科' : '自然科'}學習日誌給 AI</h2>
+            <span class="muted">AI 匯出核心載入失敗，請重新整理頁面</span>
+          </div>
+          <button class="btn btn-ghost" onclick="setView('dashboard')">返回首頁</button>
         </div>
-        <button class="btn btn-ghost" onclick="setView('dashboard')">返回首頁</button>
       </div>
-
-      <div class="glass" style="padding: 24px;">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
-          <b>AI 自給自足 Slim JSON (${isSocial() ? '社會科' : '自然科'})</b>
-          <button class="btn btn-primary btn-sm" id="btn-copy-json">📋 一鍵複製 JSON</button>
-        </div>
-        <textarea id="export-json-textarea" readonly style="width: 100%; height: 380px; font-family: monospace; font-size: 12px; padding: 12px; border-radius: 12px; border: 1px solid var(--line); background: #fdfdfd; resize: vertical;">${jsonStr}</textarea>
-      </div>
-    </div>
-  `;
+    `;
+  }
+  return `<div id="aix-export-root"></div>`;
 }
 
 function bindExportEvents() {
-  document.getElementById('btn-copy-json')?.addEventListener('click', () => {
-    const ta = document.getElementById('export-json-textarea');
-    if (ta) {
-      ta.select();
-      navigator.clipboard.writeText(ta.value).then(() => {
-        showToast('JSON 已複製到剪貼簿！可直接貼給 AI');
-      });
-    }
+  if (state._exportCtrl && typeof state._exportCtrl.dispose === 'function') {
+    state._exportCtrl.dispose();
+    state._exportCtrl = null;
+  }
+  const rootEl = document.getElementById('aix-export-root');
+  if (!rootEl || !window.AIExportCore || typeof window.AIExportCore.mountExportCenter !== 'function') return;
+
+  let localLogs = [];
+  try {
+    const parsed = JSON.parse(localStorage.getItem(getUserKey('recent_answer_logs')) || '[]');
+    if (Array.isArray(parsed)) localLogs = parsed;
+  } catch (e) {}
+
+  state._exportCtrl = window.AIExportCore.mountExportCenter(rootEl, {
+    subjectKey: isSocial() ? 'g6_social' : 'g6_science',
+    dbUrl: state.cloudDbUrl,
+    logsNode: getCloudLogsNode(),
+    uid: state.currentUser,
+    user: getCurrentUserObj(),
+    supportsSlow: false,
+    allQuestionsMap: buildExportQuestionsMap(),
+    errorBookIds: getErrorBook(),
+    errorCounts: getErrorCounts(),
+    localLogs,
+    legacyHistory: getFullHistory(),
+    onBack: () => setView('dashboard'),
+    onToast: showToast,
+    downloadFilenamePrefix: isSocial() ? '六上社會AI練習' : '六上自然AI練習'
   });
 }
 
